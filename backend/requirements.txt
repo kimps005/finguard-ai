@@ -1,3 +1,8 @@
 fastapi>=0.115,<1
 uvicorn>=0.34,<1
 psycopg[binary]>=3.2,<4
+httpx>=0.28,<1
+redis>=5,<8
+exchange-calendars>=4.11,<5
+pykrx>=1.2.9,<2
+tzdata>=2025.2
