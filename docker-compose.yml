@@ -1,0 +1,45 @@
+services:
+  backend:
+    build: .
+    expose:
+      - "8000"
+    environment:
+      PGHOST: db
+      PGDATABASE: ${POSTGRES_DB:-finguard}
+      PGUSER: ${POSTGRES_USER:-finguard}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      PGCONNECT_TIMEOUT: "5"
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      DART_API_KEY: ${DART_API_KEY:-}
+      FSC_SERVICE_KEY: ${FSC_SERVICE_KEY:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  db:
+    image: pgvector/pgvector:pg15
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-finguard}
+      POSTGRES_USER: ${POSTGRES_USER:-finguard}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./backend/migrations/001_module1.sql:/docker-entrypoint-initdb.d/001_module1.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
