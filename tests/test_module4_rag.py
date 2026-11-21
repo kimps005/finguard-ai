@@ -39,10 +39,13 @@ def run(coro):
 @pytest.fixture(scope="module")
 def database(tmp_path_factory):
     """Use an ephemeral PostgreSQL or a supplied test DSN, in a private schema."""
-    from embedded_postgres import get_server
-
     dsn = os.getenv("MODULE4_TEST_DSN")
-    server = nullcontext() if dsn else get_server(tmp_path_factory.mktemp("module4-pg"))
+    if dsn:
+        server = nullcontext()
+    else:
+        from embedded_postgres import get_server
+
+        server = get_server(tmp_path_factory.mktemp("module4-pg"))
     schema = "test_module4_" + uuid4().hex
     with server as pg:
         dsn = dsn or pg.get_uri()
@@ -54,6 +57,7 @@ def database(tmp_path_factory):
                     conn.execute((MIGRATIONS / migration).read_text(encoding="utf-8"))
                 yield dsn, schema
             finally:
+                conn.rollback()
                 conn.execute(f"DROP SCHEMA {schema} CASCADE")
 
 

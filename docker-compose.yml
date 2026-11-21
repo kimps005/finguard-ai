@@ -4,7 +4,7 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
     environment:
-      BACKEND_INTERNAL_URL: ${BACKEND_INTERNAL_URL:-http://backend:8000}
+      BACKEND_INTERNAL_URL: ${COMPOSE_BACKEND_INTERNAL_URL:-http://backend:8000}
       APP_ACCESS_PIN: ${APP_ACCESS_PIN:-}
     depends_on:
       - backend
@@ -17,12 +17,13 @@ services:
     expose:
       - "8000"
     environment:
-      PGHOST: db
+      PGHOST: ${COMPOSE_PGHOST:-db}
+      PGPORT: ${COMPOSE_PGPORT:-5432}
       PGDATABASE: ${POSTGRES_DB:-finguard}
       PGUSER: ${POSTGRES_USER:-finguard}
       PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       PGCONNECT_TIMEOUT: "5"
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_URL: ${COMPOSE_REDIS_URL:-redis://redis:6379/0}
       DART_API_KEY: ${DART_API_KEY:-}
       FSC_SERVICE_KEY: ${FSC_SERVICE_KEY:-}
       NAVER_CLIENT_ID: ${NAVER_CLIENT_ID:-}

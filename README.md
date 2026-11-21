@@ -44,7 +44,7 @@ FastAPI는 그래프를 시작하기 전에 첫 status(router_node, started)를 
 
 ### Docker Compose
 
-NVIDIA GPU를 지원하는 Docker Compose 환경에서 저장소 루트의 .env.example을 .env로 복사해 값을 채웁니다.
+NVIDIA GPU를 지원하는 Docker Compose 환경에서 저장소 루트의 .env.example을 .env로 복사해 값을 채웁니다. Compose의 기본 연결 주소는 PostgreSQL `db:5432`, Redis `redis:6379`, FastAPI `http://backend:8000`입니다. Compose 내부 주소를 바꾸려면 `COMPOSE_PGHOST`, `COMPOSE_PGPORT`, `COMPOSE_REDIS_URL`, `COMPOSE_BACKEND_INTERNAL_URL`을 설정합니다.
 
 ```powershell
 Copy-Item .env.example .env
@@ -58,7 +58,7 @@ POSTGRES_PASSWORD와 APP_ACCESS_PIN을 지정합니다. 종목 마스터 동기�
 
 ### 로컬 개발 (Windows PowerShell)
 
-Python 3.11 가상환경과 Node.js 22.18 이상을 사용합니다. 아래 Compose 오버라이드는 호스트의 로컬 백엔드가 연결할 수 있도록 DB와 Redis를 루프백에 공개합니다. 설치된 PostgreSQL·pgvector와 Redis를 사용한다면 해당 주소를 PG 변수와 REDIS_URL에 넣습니다.
+Python 3.11 가상환경과 Node.js 22.18 이상을 사용합니다. 아래 Compose 오버라이드는 호스트에서 접근할 수 있도록 DB와 Redis를 루프백에 공개합니다. .env.example의 `PGHOST`, `PGPORT`, `REDIS_URL`, `BACKEND_INTERNAL_URL`은 이 로컬 실행용입니다. 별도로 설치한 PostgreSQL·pgvector와 Redis를 사용한다면 여기에 해당 주소를 지정합니다.
 
 ```powershell
 uv venv --python 3.11 --seed .venv
@@ -77,12 +77,9 @@ Get-Content .env | ForEach-Object {
         Set-Item -LiteralPath ("Env:" + $Matches[1]) -Value $Matches[2]
     }
 }
-$env:PGHOST = '127.0.0.1'
-$env:PGPORT = '55432'
 $env:PGDATABASE = $env:POSTGRES_DB
 $env:PGUSER = $env:POSTGRES_USER
 $env:PGPASSWORD = $env:POSTGRES_PASSWORD
-$env:REDIS_URL = 'redis://127.0.0.1:56379/0'
 
 .\.venv\Scripts\python.exe -m backend.dart_etl --migrate
 .\.venv\Scripts\python.exe -m backend.sync_stock_master
@@ -101,13 +98,12 @@ with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
 '@ | .\.venv\Scripts\python.exe -
 ```
 
-별도 셸에서 .env의 APP_ACCESS_PIN을 환경 변수로 설정한 뒤 저장소 루트에서 Next.js를 실행합니다.
+별도 셸에서 위와 같은 방법으로 .env를 불러온 뒤 저장소 루트에서 Next.js를 루프백에 바인딩합니다.
 
 ```powershell
-$env:BACKEND_INTERNAL_URL = 'http://127.0.0.1:8000'
 Set-Location frontend
 npm ci
-npm run dev
+npm run dev -- --hostname 127.0.0.1
 ```
 
 Linux·macOS의 가상환경 실행 경로는 ./.venv/bin/python과 ./.venv/bin/pip입니다. Linux 백엔드는 ./.venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1로 실행할 수 있습니다.
@@ -163,4 +159,19 @@ npm --prefix frontend test
 npm --prefix frontend run build
 ```
 
-Module 4 통합 테스트는 기본적으로 내장 PostgreSQL을 시작합니다. Compose DB를 사용할 경우 위의 루프백 포트를 열고 MODULE4_TEST_DSN에 pgvector 초기화가 완료된 테스트 DB의 DSN을 지정한 뒤 pytest를 다시 실행합니다. 테스트는 별도 스키마를 사용합니다.
+Module 4 통합 테스트는 기본적으로 내장 PostgreSQL을 시작합니다. Compose DB를 사용하려면 위의 루프백 포트 오버라이드로 `db`와 `redis`를 시작하고 `PGDATABASE`, `PGUSER`, `PGPASSWORD`를 설정합니다. 테스트는 pgvector가 설치된 DB에 별도 스키마를 만들고 종료 시 삭제합니다.
+
+```powershell
+$env:MODULE4_TEST_DSN = 'host=127.0.0.1 port=55432'
+.\.venv\Scripts\python.exe -m pytest tests/test_module4_rag.py
+.\.venv\Scripts\python.exe -m pytest
+```
+
+최종 스모크는 RTX에서 FP16 모델 두 개의 적재 피크를 측정하고 임시 루프백 서버에서 모의 계좌와 공시로 FastAPI 및 Next.js의 실제 HTTP 스트림을 검증합니다. 스크립트가 임시 PIN과 포트를 지정합니다. Hugging Face 캐시가 이미 준비된 환경에서는 `HF_HUB_OFFLINE=1`을 추가할 수 있습니다.
+
+```powershell
+npm --prefix frontend ci
+npm --prefix frontend run build
+$env:HF_HOME = Join-Path $PWD 'data/huggingface'
+.\.venv\Scripts\python.exe -X utf8 scripts/smoke_test_e2e.py
+```

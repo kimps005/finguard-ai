@@ -210,7 +210,7 @@ class BrokerConnector:
     @asynccontextmanager
     async def from_env(cls):
         settings = BrokerSettings.from_env()
-        redis = Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"),
+        redis = Redis.from_url(os.getenv("REDIS_URL") or "redis://127.0.0.1:6379/0",
                                socket_timeout=5, socket_connect_timeout=5)
         async with redis, httpx.AsyncClient(timeout=5) as http:
             yield cls(settings, redis, http)

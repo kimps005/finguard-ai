@@ -16,8 +16,7 @@ export function privateResponse(message: string, status: number): Response {
 }
 
 export function fetchBackend(request: Request, path: string, init?: RequestInit) {
-  const base = process.env.BACKEND_INTERNAL_URL;
-  if (!base) throw new Error("Missing BACKEND_INTERNAL_URL");
+  const base = process.env.BACKEND_INTERNAL_URL || "http://127.0.0.1:8000";
   return fetch(new URL(path, base), {
     ...init,
     signal: request.signal,
