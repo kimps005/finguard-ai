@@ -1,6 +1,9 @@
 services:
   backend:
     build: .
+    gpus: all
+    volumes:
+      - ./data/huggingface:/root/.cache/huggingface
     expose:
       - "8000"
     environment:
@@ -12,6 +15,9 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       DART_API_KEY: ${DART_API_KEY:-}
       FSC_SERVICE_KEY: ${FSC_SERVICE_KEY:-}
+      NAVER_CLIENT_ID: ${NAVER_CLIENT_ID:-}
+      NAVER_CLIENT_SECRET: ${NAVER_CLIENT_SECRET:-}
+      ECOS_API_KEY: ${ECOS_API_KEY:-}
       IS_VIRTUAL: ${IS_VIRTUAL:-true}
       KIS_APP_KEY: ${KIS_APP_KEY:-}
       KIS_APP_SECRET: ${KIS_APP_SECRET:-}
@@ -38,6 +44,7 @@ services:
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
       - ./backend/migrations/001_module1.sql:/docker-entrypoint-initdb.d/001_module1.sql:ro
+      - ./backend/migrations/004_module4.sql:/docker-entrypoint-initdb.d/004_module4.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 5s
