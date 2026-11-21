@@ -72,6 +72,41 @@ def parse_frame(frame):
     return event.removeprefix("event: "), json.loads(data.removeprefix("data: "))
 
 
+@pytest.mark.parametrize("positions", [[], [position(asset="ETF")]])
+def test_account_snapshot_uses_only_balance_and_orderable_cash(monkeypatch, positions):
+    market = setup_market(monkeypatch, positions)
+    mock_get = AsyncMock(return_value=({"output": {"ord_psbl_cash": "900.12"}}, {}))
+    market.broker._get = mock_get
+    market.broker.settings = BrokerSettings(is_virtual=True, virtual=Credentials("key", "secret", "12345678"),
+                                            live=Credentials("", "", ""))
+    monkeypatch.setattr(app.state, "market", market, raising=False)
+
+    async def get_snapshot():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://test") as client:
+            return await client.get("/api/v1/account")
+
+    response = asyncio.run(get_snapshot())
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    snapshot = response.json()
+    assert snapshot["account_summary"] == {
+        "total_value": "2000", "cash_deposit": "1234.56", "cash_weight": "0.61728",
+        "orderable_cash": "900.12",
+    }
+    if positions:
+        assert snapshot["holdings"][0]["asset_type"] == "ETF"
+    else:
+        assert snapshot["holdings"] == []
+    mock_get.assert_awaited_once_with(
+        VIRTUAL, market.broker.settings.virtual, "/trading/inquire-psbl-order", "VTTC8908R",
+        {"CANO": "12345678", "ACNT_PRDT_CD": "01", "PDNO": "", "ORD_UNPR": "0",
+         "ORD_DVSN": "00", "CMA_EVLU_AMT_ICLD_YN": "N", "OVRS_ICLD_YN": "N"},
+    )
+    market.broker.get_balance.assert_awaited_once_with()
+    assert not market.etl.method_calls and not market.external.method_calls
+
+
 def test_fast_path_stream_and_latency(monkeypatch):
     market = setup_market(monkeypatch, [position()])
     graph = build_graph(market)
@@ -212,7 +247,7 @@ def test_simulation_uses_orderable_cash_and_module3(monkeypatch):
     market.orderable_cash.assert_awaited_once_with(h)
     result = state["simulation_result"]
     assert result["buy_quantity"] == D(2) and result["remaining_cash"] == D(300)
-    assert result["weight"] == D("0.3") and "예상 비중 30.00%" in state["final_report"]
+    assert result["weight"] == D("0.3") and "| 예상 비중 | 30.00% |" in state["final_report"]
 
 
 def test_provider_error_terminates_stream(monkeypatch):

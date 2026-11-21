@@ -121,7 +121,7 @@ class MarketData:
                 item.reports = reports[item.stock.corp_code].result()
         return balance, on, macro.result(), inputs
 
-    async def orderable_cash(self, holding: Holding) -> Decimal:
+    async def orderable_cash(self, holding: Holding | None = None) -> Decimal:
         settings = self.broker.settings
         domain, credentials, tr_id = (
             (VIRTUAL, settings.virtual, "VTTC8908R") if settings.is_virtual
@@ -129,6 +129,7 @@ class MarketData:
         payload, _ = await self.broker._get(
             domain, credentials, "/trading/inquire-psbl-order", tr_id,
             {"CANO": credentials.account_no, "ACNT_PRDT_CD": credentials.product_code,
-             "PDNO": holding.stock_code, "ORD_UNPR": format(holding.current_price, "f"),
+             "PDNO": holding.stock_code if holding else "",
+             "ORD_UNPR": format(holding.current_price, "f") if holding else "0",
              "ORD_DVSN": "00", "CMA_EVLU_AMT_ICLD_YN": "N", "OVRS_ICLD_YN": "N"})
         return number(payload["output"]["ord_psbl_cash"])

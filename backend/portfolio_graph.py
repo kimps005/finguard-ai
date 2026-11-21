@@ -125,11 +125,15 @@ def report_parts(state):
             yield result["message"]
         else:
             weight = result["weight"]
-            yield (f"{result['stock_code']} · 매수 {result['buy_quantity']:,}주 · "
-                   f"투자 금액 {result['invested_amount']:,}원 · 예상 평단가 {result['average_price']:,.2f}원 · "
-                   f"남는 주문 가능 현금 {result['remaining_cash']:,}원")
+            average = result["average_price"]
+            yield ("\n| 항목 | 시뮬레이션 결과 |\n| --- | ---: |\n"
+                   f"| 종목 | {result['stock_code']} |\n"
+                   f"| 매수 수량 | {result['buy_quantity']:,}주 |\n"
+                   f"| 투자 금액 | {result['invested_amount']:,}원 |\n"
+                   f"| 예상 평단가 | {f'{average:,.2f}원' if average is not None else '—'} |\n"
+                   f"| 남는 주문 가능 현금 | {result['remaining_cash']:,}원 |\n")
             if weight is not None:
-                yield f" · 예상 비중 {weight:.2%}"
+                yield f"| 예상 비중 | {weight:.2%} |\n"
     for row in state["verified_stock_results"]:
         if row["analysis_text"]:
             yield f"\n\n### {row['stock_code']}\n{row['analysis_text']}"

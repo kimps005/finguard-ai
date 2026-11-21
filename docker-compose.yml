@@ -1,4 +1,14 @@
 services:
+  frontend:
+    build: ./frontend
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      BACKEND_INTERNAL_URL: ${BACKEND_INTERNAL_URL:-http://backend:8000}
+      APP_ACCESS_PIN: ${APP_ACCESS_PIN:-}
+    depends_on:
+      - backend
+
   backend:
     build: .
     gpus: all

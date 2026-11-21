@@ -4,13 +4,13 @@ import os
 from typing import Annotated
 
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
 from backend.broker import BrokerConnector
 from backend.connectors import ExternalConnectors
 from backend.dart_etl import DartETL
-from backend.portfolio_graph import build_graph
+from backend.portfolio_graph import account_view, build_graph
 from backend.portfolio_market import MarketData
 from backend.stock_analysis import dump
 
@@ -26,7 +26,8 @@ async def lifespan(app: FastAPI):
         app.state.broker = broker
         app.state.dart_etl = DartETL(broker.redis, broker.http, os.getenv("DART_API_KEY"))
         app.state.external_connectors = ExternalConnectors.from_env(broker.http, broker.redis)
-        app.state.graph = build_graph(MarketData(broker, app.state.dart_etl, app.state.external_connectors))
+        app.state.market = MarketData(broker, app.state.dart_etl, app.state.external_connectors)
+        app.state.graph = build_graph(app.state.market)
         yield
 
 
@@ -36,6 +37,20 @@ app = FastAPI(title="FinGuard AI", lifespan=lifespan)
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/v1/account")
+async def account_snapshot(request: Request):
+    market = request.app.state.market
+    balance = await market.broker.get_balance()
+    snapshot = account_view(balance)
+    orderable_cash = None
+    try:
+        orderable_cash = await market.orderable_cash()
+    except Exception as exc:
+        logger.warning("Orderable cash lookup failed (%s)", type(exc).__name__)
+    snapshot["account_summary"]["orderable_cash"] = orderable_cash
+    return Response(dump(snapshot), media_type="application/json", headers={"Cache-Control": "no-store"})
 
 
 class ChatRequest(BaseModel):
