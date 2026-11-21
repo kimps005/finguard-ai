@@ -3,7 +3,10 @@
 __pycache__/
 node_modules/
 .next/
-data/
+/data/*
+!/data/eval/
+/data/eval/*
+!/data/eval/ragas_benchmark_20.json
 .pytest_cache/
 *.py[cod]
 /work/

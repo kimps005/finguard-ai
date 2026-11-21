@@ -109,6 +109,8 @@ def report_parts(state):
         if "scores" in card:
             total = card["total"]
             yield f" · 정량 점수 {total}/100" if total is not None else " · 정량 점수 자료 부족"
+            if (dilution := card["dilution_pct"]) is not None:
+                yield f" · 오버행 희석률 {dilution:f}%"
         elif "five_day_flow" in card:
             flow = card["five_day_flow"]
             yield (f" · 5일 순매수 외국인 {flow['foreign_net_buy']:,}주, "

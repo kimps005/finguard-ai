@@ -1,0 +1,726 @@
+{
+  "source": "OpenDART",
+  "account_source": "synthetic",
+  "cases": [
+    {
+      "id": "bond_issue-1",
+      "type": "bond_issue",
+      "issuer": "동부건설",
+      "stock_code": "005960",
+      "corp_code": "00115612",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260416000470",
+      "question": "동부건설의 공시에서 전환사채의 표면이자율과 만기이자율은 얼마인가요?",
+      "reference": "표면 3%, 만기 6%다.",
+      "documents": [
+        {
+          "rcept_no": "20260416000470",
+          "chunk_no": 0,
+          "title": "주요사항보고서(전환사채권발행결정)",
+          "text": "표면이자율은 3.0%, 만기이자율은 6.0%다.",
+          "relevant": true
+        },
+        {
+          "rcept_no": "20260416000470",
+          "chunk_no": 1,
+          "title": "주요사항보고서(전환사채권발행결정)",
+          "text": "사채 발행으로 조달하는 운영자금은 400억원이다.",
+          "relevant": false
+        }
+      ],
+      "account": {
+        "average_price": "9637.15",
+        "current_price": "12253",
+        "purchase_budget": "24506",
+        "listed_shares": "10000000",
+        "convertible_shares": "200000",
+        "lockup_shares": "125000",
+        "q3_profit": "110",
+        "q4_profit": "230"
+      }
+    },
+    {
+      "id": "bond_issue-2",
+      "type": "bond_issue",
+      "issuer": "블루산업개발",
+      "stock_code": "006740",
+      "corp_code": "00141404",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260415000704",
+      "question": "블루산업개발의 공시에서 이 공시의 전환사채로 얼마를 조달하며 어디에 쓰나요?",
+      "reference": "150억원을 운영자금으로 조달한다.",
+      "documents": [
+        {
+          "rcept_no": "20260415000704",
+          "chunk_no": 0,
+          "title": "주요사항보고서(전환사채권발행결정)",
+          "text": "조달 자금 150억원은 운영자금에 배정됐다.",
+          "relevant": true
+        },
+        {
+          "rcept_no": "20260415000704",
+          "chunk_no": 1,
+          "title": "주요사항보고서(전환사채권발행결정)",
+          "text": "사채의 표면이자율은 1.0%, 만기이자율은 2.0%다.",
+          "relevant": false
+        }
+      ],
+      "account": {
+        "average_price": "9774.15",
+        "current_price": "12506",
+        "purchase_budget": "37518",
+        "listed_shares": "10000000",
+        "convertible_shares": "350000",
+        "lockup_shares": "250000",
+        "q3_profit": "-50",
+        "q4_profit": "60"
+      }
+    },
+    {
+      "id": "bond_issue-3",
+      "type": "bond_issue",
+      "issuer": "삼성에스디에스",
+      "stock_code": "018260",
+      "corp_code": "00126186",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260415000014",
+      "question": "삼성에스디에스의 공시에서 전환사채 발행으로 조달하는 운영자금은 얼마인가요?",
+      "reference": "운영자금 조달액은 1조 2,200억원이다.",
+      "documents": [
+        {
+          "rcept_no": "20260415000014",
+          "chunk_no": 0,
+          "title": "주요사항보고서(전환사채권발행결정)",
+          "text": "전환사채로 운영자금 1조 2,200억원을 조달한다.",
+          "relevant": true
+        },
+        {
+          "rcept_no": "20260415000014",
+          "chunk_no": 1,
+          "title": "주요사항보고서(전환사채권발행결정)",
+          "text": "사채의 표면이자율과 만기이자율은 각각 2.5%다.",
+          "relevant": false
+        }
+      ],
+      "account": {
+        "average_price": "9911.15",
+        "current_price": "12759",
+        "purchase_budget": "51036",
+        "listed_shares": "10000000",
+        "convertible_shares": "500000",
+        "lockup_shares": "375000",
+        "q3_profit": "-80",
+        "q4_profit": "-40"
+      }
+    },
+    {
+      "id": "bond_issue-4",
+      "type": "bond_issue",
+      "issuer": "나무AX",
+      "stock_code": "242040",
+      "corp_code": "01136348",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260417000402",
+      "question": "나무AX의 공시에서 신주인수권의 주당 행사가액과 행사비율은 얼마인가요?",
+      "reference": "주당 6,055원에 행사하며 행사비율은 100%다.",
+      "documents": [
+        {
+          "rcept_no": "20260417000402",
+          "chunk_no": 0,
+          "title": "주요사항보고서(신주인수권부사채권발행결정)",
+          "text": "행사가액은 주당 6,055원이고 행사비율은 100.0%다.",
+          "relevant": true
+        },
+        {
+          "rcept_no": "20260417000402",
+          "chunk_no": 1,
+          "title": "주요사항보고서(신주인수권부사채권발행결정)",
+          "text": "발행으로 조달하는 운영자금은 60억원이다.",
+          "relevant": false
+        }
+      ],
+      "account": {
+        "average_price": "10048.15",
+        "current_price": "13012",
+        "purchase_budget": "65060",
+        "listed_shares": "10000000",
+        "convertible_shares": "650000",
+        "lockup_shares": "0",
+        "q3_profit": "150",
+        "q4_profit": "100"
+      }
+    },
+    {
+      "id": "rights_issue-1",
+      "type": "rights_issue",
+      "issuer": "NC",
+      "stock_code": "036570",
+      "corp_code": "00261443",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260414800760",
+      "question": "NC의 공시에서 종속회사 유상증자의 배정 방식과 발행 보통주 수는 어떻게 되나요?",
+      "reference": "기존 주주에게 배정하는 방식으로 보통주 1,000주를 발행할 예정이다.",
+      "documents": [
+        {
+          "rcept_no": "20260414800760",
+          "chunk_no": 0,
+          "title": "유상증자결정(종속회사의주요경영사항)",
+          "text": "종속회사는 주주배정증자로 보통주 1,000주를 발행한다.",
+          "relevant": true
+        },
+        {
+          "rcept_no": "20260414800760",
+          "chunk_no": 1,
+          "title": "유상증자결정(종속회사의주요경영사항)",
+          "text": "타법인 증권 취득에 배정된 자금은 303,506,980,000원이다.",
+          "relevant": false
+        }
+      ],
+      "account": {
+        "average_price": "10185.15",
+        "current_price": "13265",
+        "purchase_budget": "26530",
+        "listed_shares": "10000000",
+        "convertible_shares": "0",
+        "lockup_shares": "125000",
+        "q3_profit": "110",
+        "q4_profit": "230"
+      }
+    },
+    {
+      "id": "rights_issue-2",
+      "type": "rights_issue",
+      "issuer": "에이프로젠바이오로직스",
+      "stock_code": "003060",
+      "corp_code": "00101044",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260413002472",
+      "question": "에이프로젠바이오로직스의 공시에서 유상증자로 어떤 주식을 몇 주 발행하고 어떻게 배정하나요?",
+      "reference": "제3자에게 배정할 신주는 보통주 592,593주다.",
+      "documents": [
+        {
+          "rcept_no": "20260413002472",
+          "chunk_no": 0,
+          "title": "주요사항보고서(유상증자결정)",
+          "text": "보통주 592,593주를 제3자배정 방식으로 발행한다.",
+          "relevant": true
+        },
+        {
+          "rcept_no": "20260413002472",
+          "chunk_no": 1,
+          "title": "주요사항보고서(유상증자결정)",
+          "text": "발행 신주의 주당 액면가액은 500원이다.",
+          "relevant": false
+        }
+      ],
+      "account": {
+        "average_price": "10322.15",
+        "current_price": "13518",
+        "purchase_budget": "40554",
+        "listed_shares": "10000000",
+        "convertible_shares": "0",
+        "lockup_shares": "250000",
+        "q3_profit": "-50",
+        "q4_profit": "60"
+      }
+    },
+    {
+      "id": "rights_issue-3",
+      "type": "rights_issue",
+      "issuer": "한국카본",
+      "stock_code": "017960",
+      "corp_code": "00159795",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260413800116",
+      "question": "한국카본의 공시에서 종속회사 유상증자의 시설자금과 운영자금은 각각 얼마인가요?",
+      "reference": "시설에 27,376,300,000원, 운영에 423,525,478원을 배정했다.",
+      "documents": [
+        {
+          "rcept_no": "20260413800116",
+          "chunk_no": 0,
+          "title": "유상증자결정(종속회사의주요경영사항)",
+          "text": "시설자금은 27,376,300,000원이며 운영자금은 423,525,478원이다.",
+          "relevant": true
+        },
+        {
+          "rcept_no": "20260413800116",
+          "chunk_no": 1,
+          "title": "유상증자결정(종속회사의주요경영사항)",
+          "text": "종속회사는 주주배정으로 보통주 2,000,000주를 발행할 예정이다.",
+          "relevant": false
+        }
+      ],
+      "account": {
+        "average_price": "10459.15",
+        "current_price": "13771",
+        "purchase_budget": "55084",
+        "listed_shares": "10000000",
+        "convertible_shares": "0",
+        "lockup_shares": "375000",
+        "q3_profit": "-80",
+        "q4_profit": "-40"
+      }
+    },
+    {
+      "id": "rights_issue-4",
+      "type": "rights_issue",
+      "issuer": "한솔홀딩스",
+      "stock_code": "004150",
+      "corp_code": "00171636",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260410801181",
+      "question": "한솔홀딩스의 공시에서 자회사 유상증자로 조달하는 타법인 증권 취득자금은 얼마인가요?",
+      "reference": "다른 법인의 증권 취득에 45,000,620,000원을 배정했다.",
+      "documents": [
+        {
+          "rcept_no": "20260410801181",
+          "chunk_no": 0,
+          "title": "주요사항보고서(유상증자결정)(자회사의 주요경영사항)",
+          "text": "타법인 증권 취득자금으로 45,000,620,000원을 조달할 예정이다.",
+          "relevant": true
+        },
+        {
+          "rcept_no": "20260410801181",
+          "chunk_no": 1,
+          "title": "주요사항보고서(유상증자결정)(자회사의 주요경영사항)",
+          "text": "자회사 신주의 주당 액면가는 1,000원이다.",
+          "relevant": false
+        }
+      ],
+      "account": {
+        "average_price": "10596.15",
+        "current_price": "14024",
+        "purchase_budget": "70120",
+        "listed_shares": "10000000",
+        "convertible_shares": "0",
+        "lockup_shares": "0",
+        "q3_profit": "150",
+        "q4_profit": "100"
+      }
+    },
+    {
+      "id": "control_change-1",
+      "type": "control_change",
+      "issuer": "광명전기",
+      "stock_code": "017040",
+      "corp_code": "00103662",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260417800893",
+      "question": "광명전기의 공시에서 변경 후 최대주주의 이름과 지분율은 어떻게 되나요?",
+      "reference": "에이치케이홀딩스(유)가 지분 23.66%로 최대주주가 됐다.",
+      "documents": [
+        {
+          "rcept_no": "20260417800893",
+          "chunk_no": 0,
+          "title": "최대주주변경",
+          "text": "변경 후 최대주주는 에이치케이홀딩스(유)이며 소유비율은 23.66%다.",
+          "relevant": true
+        },
+        {
+          "rcept_no": "20260417800893",
+          "chunk_no": 1,
+          "title": "최대주주변경",
+          "text": "최대주주 변경일은 2026년 4월 17일이다.",
+          "relevant": false
+        }
+      ],
+      "account": {
+        "average_price": "10733.15",
+        "current_price": "14277",
+        "purchase_budget": "28554",
+        "listed_shares": "10000000",
+        "convertible_shares": "0",
+        "lockup_shares": "125000",
+        "q3_profit": "110",
+        "q4_profit": "230"
+      }
+    },
+    {
+      "id": "control_change-2",
+      "type": "control_change",
+      "issuer": "남성",
+      "stock_code": "004270",
+      "corp_code": "00172185",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260413800449",
+      "question": "남성의 공시에서 최대주주가 바뀐 사유와 실제 변경일은 무엇인가요?",
+      "reference": "변경 사유는 증여이며 변경일은 2026년 4월 10일이다.",
+      "documents": [
+        {
+          "rcept_no": "20260413800449",
+          "chunk_no": 0,
+          "title": "최대주주변경",
+          "text": "증여로 최대주주가 변경됐으며 변경일은 2026년 4월 10일이다.",
+          "relevant": true
+        },
+        {
+          "rcept_no": "20260413800449",
+          "chunk_no": 1,
+          "title": "최대주주변경",
+          "text": "변경 후 최대주주 등 전체 소유주식은 13,657,894주다.",
+          "relevant": false
+        }
+      ],
+      "account": {
+        "average_price": "10870.15",
+        "current_price": "14530",
+        "purchase_budget": "43590",
+        "listed_shares": "10000000",
+        "convertible_shares": "0",
+        "lockup_shares": "250000",
+        "q3_profit": "-50",
+        "q4_profit": "60"
+      }
+    },
+    {
+      "id": "control_change-3",
+      "type": "control_change",
+      "issuer": "비투엔",
+      "stock_code": "307870",
+      "corp_code": "01326792",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260417900910",
+      "question": "비투엔의 공시에서 변경 후 최대주주와 소유주식 수는 얼마인가요?",
+      "reference": "새 최대주주 스트레지 1호 조합의 보유량은 17,124,356주다.",
+      "documents": [
+        {
+          "rcept_no": "20260417900910",
+          "chunk_no": 0,
+          "title": "최대주주변경",
+          "text": "스트레지 1호 조합이 최대주주가 됐으며 소유주식 수는 17,124,356주다.",
+          "relevant": true
+        },
+        {
+          "rcept_no": "20260417900910",
+          "chunk_no": 1,
+          "title": "최대주주변경",
+          "text": "변경일은 주식양수도계약 잔금 수령일인 2026년 4월 17일이다.",
+          "relevant": false
+        }
+      ],
+      "account": {
+        "average_price": "11007.15",
+        "current_price": "14783",
+        "purchase_budget": "59132",
+        "listed_shares": "10000000",
+        "convertible_shares": "0",
+        "lockup_shares": "375000",
+        "q3_profit": "-80",
+        "q4_profit": "-40"
+      }
+    },
+    {
+      "id": "control_change-4",
+      "type": "control_change",
+      "issuer": "로지스몬",
+      "stock_code": "223220",
+      "corp_code": "01060735",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260414600928",
+      "question": "로지스몬의 공시에서 최대주주 변경을 일으킨 거래 방식과 거래 주식 수는 무엇인가요?",
+      "reference": "더플러스2호투자조합으로부터 857,142주를 장외매수했다.",
+      "documents": [
+        {
+          "rcept_no": "20260414600928",
+          "chunk_no": 0,
+          "title": "최대주주변경",
+          "text": "아이케이조합이 더플러스2호투자조합 보유 주식 857,142주를 장외에서 매수했다.",
+          "relevant": true
+        },
+        {
+          "rcept_no": "20260414600928",
+          "chunk_no": 1,
+          "title": "최대주주변경",
+          "text": "최대주주 변경일은 2026년 3월 24일이다.",
+          "relevant": false
+        }
+      ],
+      "account": {
+        "average_price": "11144.15",
+        "current_price": "15036",
+        "purchase_budget": "75180",
+        "listed_shares": "10000000",
+        "convertible_shares": "0",
+        "lockup_shares": "0",
+        "q3_profit": "150",
+        "q4_profit": "100"
+      }
+    },
+    {
+      "id": "supply_contract-1",
+      "type": "supply_contract",
+      "issuer": "GS건설",
+      "stock_code": "006360",
+      "corp_code": "00120030",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260417800275",
+      "question": "GS건설의 공시에서 공급계약 금액과 최근 매출액 대비 비율은 얼마인가요?",
+      "reference": "375,086,000,000원이며 최근 매출액의 3.01%에 해당한다.",
+      "documents": [
+        {
+          "rcept_no": "20260417800275",
+          "chunk_no": 0,
+          "title": "단일판매ㆍ공급계약체결",
+          "text": "계약금액은 375,086,000,000원으로 최근 매출액의 3.01%다.",
+          "relevant": true
+        },
+        {
+          "rcept_no": "20260417800275",
+          "chunk_no": 1,
+          "title": "단일판매ㆍ공급계약체결",
+          "text": "공급 지역은 서울시 관악구 봉천동 480번지 일대다.",
+          "relevant": false
+        }
+      ],
+      "account": {
+        "average_price": "11281.15",
+        "current_price": "15289",
+        "purchase_budget": "30578",
+        "listed_shares": "10000000",
+        "convertible_shares": "0",
+        "lockup_shares": "125000",
+        "q3_profit": "110",
+        "q4_profit": "230"
+      }
+    },
+    {
+      "id": "supply_contract-2",
+      "type": "supply_contract",
+      "issuer": "HD현대중공업",
+      "stock_code": "329180",
+      "corp_code": "01390344",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260417800177",
+      "question": "HD현대중공업의 공시에서 계약 상대방과 계약 종료일은 무엇인가요?",
+      "reference": "중동 선사와 맺은 계약으로 2029년 11월 30일에 종료된다.",
+      "documents": [
+        {
+          "rcept_no": "20260417800177",
+          "chunk_no": 0,
+          "title": "단일판매ㆍ공급계약체결",
+          "text": "상대방은 중동 소재 선사이며 종료일은 2029년 11월 30일이다.",
+          "relevant": true
+        },
+        {
+          "rcept_no": "20260417800177",
+          "chunk_no": 1,
+          "title": "단일판매ㆍ공급계약체결",
+          "text": "계약금액은 674,700,000,000원이다.",
+          "relevant": false
+        }
+      ],
+      "account": {
+        "average_price": "11418.15",
+        "current_price": "15542",
+        "purchase_budget": "46626",
+        "listed_shares": "10000000",
+        "convertible_shares": "0",
+        "lockup_shares": "250000",
+        "q3_profit": "-50",
+        "q4_profit": "60"
+      }
+    },
+    {
+      "id": "supply_contract-3",
+      "type": "supply_contract",
+      "issuer": "DL이앤씨",
+      "stock_code": "375500",
+      "corp_code": "01524093",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260417800065",
+      "question": "DL이앤씨의 공시에서 계약의 선급금과 준공금 지급 비율은 얼마인가요?",
+      "reference": "선급금 5%, 준공금 10%를 계약금액 기준으로 지급한다.",
+      "documents": [
+        {
+          "rcept_no": "20260417800065",
+          "chunk_no": 0,
+          "title": "단일판매ㆍ공급계약체결",
+          "text": "선급금은 계약금액의 5%, 준공금은 계약금액의 10%다.",
+          "relevant": true
+        },
+        {
+          "rcept_no": "20260417800065",
+          "chunk_no": 1,
+          "title": "단일판매ㆍ공급계약체결",
+          "text": "계약 상대방은 코리안리재보험(주)이다.",
+          "relevant": false
+        }
+      ],
+      "account": {
+        "average_price": "11555.15",
+        "current_price": "15795",
+        "purchase_budget": "63180",
+        "listed_shares": "10000000",
+        "convertible_shares": "0",
+        "lockup_shares": "375000",
+        "q3_profit": "-80",
+        "q4_profit": "-40"
+      }
+    },
+    {
+      "id": "supply_contract-4",
+      "type": "supply_contract",
+      "issuer": "대우건설",
+      "stock_code": "047040",
+      "corp_code": "00124540",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260416800364",
+      "question": "대우건설의 공시에서 계약 상대방과 계약금액은 무엇인가요?",
+      "reference": "한국토지주택공사와 1,268,656,700,000원 규모로 계약했다.",
+      "documents": [
+        {
+          "rcept_no": "20260416800364",
+          "chunk_no": 0,
+          "title": "단일판매ㆍ공급계약체결",
+          "text": "상대방은 한국토지주택공사이며 계약금액은 1,268,656,700,000원이다.",
+          "relevant": true
+        },
+        {
+          "rcept_no": "20260416800364",
+          "chunk_no": 1,
+          "title": "단일판매ㆍ공급계약체결",
+          "text": "공급 지역은 경기도 성남시 수정구 신흥동 2890번지 일대다.",
+          "relevant": false
+        }
+      ],
+      "account": {
+        "average_price": "11692.15",
+        "current_price": "16048",
+        "purchase_budget": "80240",
+        "listed_shares": "10000000",
+        "convertible_shares": "0",
+        "lockup_shares": "0",
+        "q3_profit": "150",
+        "q4_profit": "100"
+      }
+    },
+    {
+      "id": "preliminary_earnings-1",
+      "type": "preliminary_earnings",
+      "issuer": "LS에코에너지",
+      "stock_code": "229640",
+      "corp_code": "01093007",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260414800130",
+      "question": "LS에코에너지의 공시에서 2026년 1분기 잠정 연결 영업이익과 전년 동기 대비 증가율은 얼마인가요?",
+      "reference": "연결 영업이익은 20,096백만원으로 전년 동기보다 31.0% 늘었다.",
+      "documents": [
+        {
+          "rcept_no": "20260414800130",
+          "chunk_no": 0,
+          "title": "연결재무제표기준영업(잠정)실적(공정공시)",
+          "text": "2026년 1분기 잠정 연결 영업이익은 20,096백만원, 전년 동기 대비 증가율은 31.0%다.",
+          "relevant": true
+        },
+        {
+          "rcept_no": "20260414800130",
+          "chunk_no": 1,
+          "title": "연결재무제표기준영업(잠정)실적(공정공시)",
+          "text": "1분기 잠정 연결 당기순이익은 14,518백만원이다.",
+          "relevant": false
+        }
+      ],
+      "account": {
+        "average_price": "11829.15",
+        "current_price": "16301",
+        "purchase_budget": "32602",
+        "listed_shares": "10000000",
+        "convertible_shares": "0",
+        "lockup_shares": "125000",
+        "q3_profit": "110",
+        "q4_profit": "230"
+      }
+    },
+    {
+      "id": "preliminary_earnings-2",
+      "type": "preliminary_earnings",
+      "issuer": "한진",
+      "stock_code": "002320",
+      "corp_code": "00163512",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260413800816",
+      "question": "한진의 공시에서 2026년 1분기 잠정 연결 매출액은 얼마이고 전분기와 비교하면 어떤가요?",
+      "reference": "1분기 연결 매출액은 7,698억원으로 직전 분기보다 3.3% 줄었다.",
+      "documents": [
+        {
+          "rcept_no": "20260413800816",
+          "chunk_no": 0,
+          "title": "연결재무제표기준영업(잠정)실적(공정공시)",
+          "text": "2026년 1분기 잠정 연결 매출액은 7,698억원이고 전분기 대비 3.3% 감소했다.",
+          "relevant": true
+        },
+        {
+          "rcept_no": "20260413800816",
+          "chunk_no": 1,
+          "title": "연결재무제표기준영업(잠정)실적(공정공시)",
+          "text": "2026년 1분기 잠정 연결 영업이익은 169억원이다.",
+          "relevant": false
+        }
+      ],
+      "account": {
+        "average_price": "11966.15",
+        "current_price": "16554",
+        "purchase_budget": "49662",
+        "listed_shares": "10000000",
+        "convertible_shares": "0",
+        "lockup_shares": "250000",
+        "q3_profit": "-50",
+        "q4_profit": "60"
+      }
+    },
+    {
+      "id": "preliminary_earnings-3",
+      "type": "preliminary_earnings",
+      "issuer": "대한항공",
+      "stock_code": "003490",
+      "corp_code": "00113526",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260413800538",
+      "question": "대한항공의 공시에서 2026년 1분기 잠정 당기순이익과 전년 동기 대비 증감률은 얼마인가요?",
+      "reference": "당기순이익 2,427억원으로 1년 전보다 25.6% 늘었다.",
+      "documents": [
+        {
+          "rcept_no": "20260413800538",
+          "chunk_no": 0,
+          "title": "영업(잠정)실적(공정공시)",
+          "text": "2026년 1분기 잠정 당기순이익은 2,427억원이며 전년 동기 대비 25.6% 증가했다.",
+          "relevant": true
+        },
+        {
+          "rcept_no": "20260413800538",
+          "chunk_no": 1,
+          "title": "영업(잠정)실적(공정공시)",
+          "text": "2026년 1분기 잠정 매출액은 45,151억원이다.",
+          "relevant": false
+        }
+      ],
+      "account": {
+        "average_price": "12103.15",
+        "current_price": "16807",
+        "purchase_budget": "67228",
+        "listed_shares": "10000000",
+        "convertible_shares": "0",
+        "lockup_shares": "375000",
+        "q3_profit": "-80",
+        "q4_profit": "-40"
+      }
+    },
+    {
+      "id": "preliminary_earnings-4",
+      "type": "preliminary_earnings",
+      "issuer": "디오",
+      "stock_code": "039840",
+      "corp_code": "00115931",
+      "source_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260416900122",
+      "question": "디오의 공시에서 2026년 1분기 잠정 연결 영업이익과 전분기 대비 증감률은 얼마인가요?",
+      "reference": "영업이익은 4,147백만원이며 직전 분기보다 193.9% 증가했다.",
+      "documents": [
+        {
+          "rcept_no": "20260416900122",
+          "chunk_no": 0,
+          "title": "연결재무제표기준영업(잠정)실적(공정공시)",
+          "text": "2026년 1분기 잠정 연결 영업이익은 4,147백만원으로 전분기 대비 193.9% 증가했다.",
+          "relevant": true
+        },
+        {
+          "rcept_no": "20260416900122",
+          "chunk_no": 1,
+          "title": "연결재무제표기준영업(잠정)실적(공정공시)",
+          "text": "2026년 1분기 잠정 연결 매출액은 41,307백만원이다.",
+          "relevant": false
+        }
+      ],
+      "account": {
+        "average_price": "12240.15",
+        "current_price": "17060",
+        "purchase_budget": "85300",
+        "listed_shares": "10000000",
+        "convertible_shares": "0",
+        "lockup_shares": "0",
+        "q3_profit": "150",
+        "q4_profit": "100"
+      }
+    }
+  ]
+}
