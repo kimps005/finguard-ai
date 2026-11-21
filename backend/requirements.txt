@@ -6,3 +6,9 @@ redis>=5,<8
 exchange-calendars>=4.11,<5
 pykrx>=1.2.9,<2
 tzdata>=2025.2
+beautifulsoup4>=4.12,<5
+kiwipiepy>=0.22,<1
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.8.0+cu128
+sentence-transformers>=5.1,<5.2
+transformers>=4.55,<5
