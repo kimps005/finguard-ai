@@ -115,7 +115,7 @@ class DailyBar:
 
 @dataclass
 class Candle:
-    time: date
+    time: date | int
     open: Decimal
     high: Decimal
     low: Decimal
@@ -162,6 +162,15 @@ def day_string(value: date) -> str:
 @lru_cache(maxsize=1)
 def krx_calendar():
     return exchange_calendars.get_calendar("XKRX")
+
+
+def candle_poll_delay(now: datetime) -> int:
+    calendar = krx_calendar()
+    session = calendar.date_to_session(now.astimezone(KST).date(), direction="next")
+    if now >= calendar.session_close(session) + timedelta(seconds=30):
+        session = calendar.next_session(session)
+    wait = calendar.session_open(session) - now
+    return max(15, wait.days * 86400 + wait.seconds + 1)
 
 
 async def load_stock_master(codes: list[str]) -> dict:
@@ -475,28 +484,75 @@ class BrokerConnector:
         return tuple(sorted((bar for bar in bars if start <= bar.session <= end),
                             key=lambda bar: bar.session))
 
-    async def get_ten_minute_candles(self, stock_code: str):
+    async def get_candle_history(self, stock_code: str, period: str) -> list[Candle]:
+        code, _ = self._market_symbol(stock_code, None)
+        start = date(1956, 1, 1)
+        end = self.clock().astimezone(KST).date()
+        candles = {}
+        while end >= start:
+            body = await self._market("inquire-daily-itemchartprice", "FHKST03010100", code, {
+                "FID_INPUT_DATE_1": day_string(start), "FID_INPUT_DATE_2": day_string(end),
+                "FID_PERIOD_DIV_CODE": period, "FID_ORG_ADJ_PRC": "0",
+            })
+            dates = []
+            for row in body["output2"]:
+                if not row.get("stck_bsop_date"):
+                    continue
+                session = date.fromisoformat(row["stck_bsop_date"])
+                if not start <= session <= end:
+                    continue
+                dates.append(session)
+                values = tuple(number(row[field]) for field in (
+                    "stck_oprc", "stck_hgpr", "stck_lwpr", "stck_clpr", "acml_vol",
+                ))
+                if min(values[:4]) > ZERO and values[4] >= ZERO:
+                    # Keep the fuller bar if the next request ends inside the same period.
+                    bucket = session.replace(month=1, day=1) if period == "Y" else session
+                    if period == "W":
+                        bucket -= timedelta(days=session.weekday())
+                    candles.setdefault(bucket, Candle(session, *values))
+            if not dates:
+                break
+            end = min(dates) - timedelta(days=1)
+        return [candles[bucket] for bucket in sorted(candles)]
+
+    async def get_ten_minute_candles(self, stock_code: str) -> list[Candle]:
         code, _ = self._market_symbol(stock_code, None)
         now = self.clock().astimezone(KST)
         calendar = krx_calendar()
         session = calendar.date_to_session(now.date(), direction="previous")
         if now < calendar.session_open(session):
             session = calendar.previous_session(session)
-        close = calendar.session_close(session).astimezone(KST).to_pydatetime()
-        cursor = min(now, close)
-        historical = session.date() != now.date()
-        if historical:
-            return await self._minute_candles(code, cursor, historical=True)
-        candles = await self._minute_candles(code, cursor)
-        if candles:
-            return candles
-        if now >= close:
-            return await self._minute_candles(code, close, historical=True)
-        previous = calendar.previous_session(session)
-        previous_close = calendar.session_close(previous).astimezone(KST).to_pydatetime()
-        return await self._minute_candles(code, previous_close, historical=True)
+        sessions = []
+        for offset in range(6):
+            start = calendar.session_open(session).astimezone(KST).to_pydatetime()
+            close = calendar.session_close(session).astimezone(KST).to_pydatetime()
+            if session.date() < now.date():
+                candles = await self._completed_minute_session(code, start, close)
+            else:
+                candles = await self._minute_candles(code, start, min(now, close), historical=now >= close)
+            sessions.append(candles)
+            if offset < 5:
+                session = calendar.previous_session(session)
+        return [candle for candles in reversed(sessions) for candle in candles]
 
-    async def _minute_candles(self, code: str, cursor: datetime, *, historical=False):
+    async def _completed_minute_session(self, code: str, start: datetime, close: datetime) -> list[Candle]:
+        key = f"finguard:candles:10m-session:{code}:{start.date()}"
+        try:
+            cached = await self.redis.get(key)
+            if cached is not None:
+                return [Candle(stamp, *map(number, values)) for stamp, *values in json.loads(cached)]
+        except (RedisError, ValueError, TypeError, DecimalException):
+            pass
+        candles = await self._minute_candles(code, start, close, historical=True)
+        payload = [(bar.time, bar.open, bar.high, bar.low, bar.close, bar.volume) for bar in candles]
+        try:
+            await self.redis.set(key, json.dumps(payload, default=str), ex=86400)
+        except RedisError:
+            pass
+        return candles
+
+    async def _minute_candles(self, code: str, start: datetime, cursor: datetime, *, historical: bool) -> list[Candle]:
         endpoint, tr_id = "inquire-time-itemchartprice", "FHKST03010200"
         params = {"FID_PW_DATA_INCU_YN": "Y", "FID_ETC_CLS_CODE": ""}
         if historical:
@@ -505,9 +561,8 @@ class BrokerConnector:
                       "FID_INPUT_DATE_1": day_string(cursor.date())}
 
         session = cursor.date()
-        start = cursor.replace(minute=cursor.minute // 10 * 10, second=0, microsecond=0) - timedelta(minutes=110)
         minutes = {}
-        for _ in range(2 if historical else 5):
+        while cursor >= start:
             body = await self._market(endpoint, tr_id, code,
                                       params | {"FID_INPUT_HOUR_1": cursor.strftime("%H%M%S")})
             page = {}
@@ -516,7 +571,7 @@ class BrokerConnector:
                     continue
                 stamp = datetime.strptime(row["stck_bsop_date"] + row["stck_cntg_hour"],
                                           "%Y%m%d%H%M%S").replace(tzinfo=KST)
-                if stamp > cursor:
+                if not start <= stamp <= cursor:
                     continue
                 values = tuple(number(row[field]) for field in (
                     "stck_oprc", "stck_hgpr", "stck_lwpr", "stck_prpr", "cntg_vol",
@@ -527,15 +582,11 @@ class BrokerConnector:
                 break
             minutes.update(page)
             cursor = min(page) - timedelta(seconds=1)
-            if cursor < start or len(body["output2"]) < (120 if historical else 30):
-                break
 
-        candles: dict[datetime, Candle] = {}
+        candles: dict[int, Candle] = {}
         for stamp in sorted(minutes):
-            if stamp < start:
-                continue
             open_, high, low, close, volume = minutes[stamp]
-            bucket = stamp.replace(minute=stamp.minute // 10 * 10, second=0, microsecond=0)
+            bucket = int(stamp.timestamp()) // 600 * 600
             if bucket not in candles:
                 candles[bucket] = Candle(bucket, open_, high, low, close, volume)
             else:
