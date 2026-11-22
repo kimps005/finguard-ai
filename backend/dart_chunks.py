@@ -78,13 +78,7 @@ def _row_lines(row: list[str], budget: int) -> Iterator[str]:
     yield _line(part)
 
 
-def _table_chunks(table: Tag, limit: int) -> Iterator[str]:
-    heading, rows = _table_rows(table)
-    if not heading:
-        return
-    header = _line([_escape(cell) for cell in heading]) + "\n" + _line(["---"] * len(heading))
-    if len(header) > limit:
-        raise ValueError("chunk limit is shorter than the original table header")
+def _render_table(header: str, rows: Iterator[list[str]], limit: int) -> Iterator[str]:
     chunk = header
     for row in rows:
         for line in _row_lines(row, limit - len(header) - 1):
@@ -93,6 +87,37 @@ def _table_chunks(table: Tag, limit: int) -> Iterator[str]:
                 chunk = header
             chunk += "\n" + line
     yield chunk
+
+
+def _table_chunks(table: Tag, limit: int) -> Iterator[str]:
+    heading, rows = _table_rows(table)
+    if not heading:
+        return
+    separator = _line(["---"] * len(heading))
+    header = _line([_escape(cell) for cell in heading]) + "\n" + separator
+    # Leave space for a row and one escaped character when the table has data.
+    row_space = len(_line([""] * len(heading))) + 3 if rows else 0
+    if len(header) + row_space <= limit:
+        yield from _render_table(header, iter(rows), limit)
+        return
+
+    # A wide table can still retain every value under its own column heading.
+    separator = "\n" + _line(["---"])
+    row_space = len(_line([""])) + 3 if rows else 0
+    heading_budget = limit - len(separator) - row_space
+    for index, label in enumerate(heading):
+        budget = heading_budget
+        if rows and len(_line([_escape(label)])) > budget:
+            # Keep enough space for useful data in each continuation chunk.
+            budget = max(len(_line([""])) + 2, budget // 2)
+        fragments = _row_lines([label], budget)
+        first = next(fragments) + separator
+        if rows:
+            yield from _render_table(first, ([row[index]] for row in rows), limit)
+        else:
+            yield first
+        for fragment in fragments:
+            yield fragment + separator
 
 
 def chunk_document(markup: str, max_chars: int = 1800) -> list[str]:

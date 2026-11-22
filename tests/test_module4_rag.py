@@ -142,6 +142,32 @@ def test_spanning_headers_nested_table_and_long_escaped_cell():
     assert "".join(c.splitlines()[2][2:-2] for c in chunks) == r"가\|나" * 60
 
 
+def test_oversized_single_cell_dart_table_keeps_all_text():
+    text = "공시|본문\\내용" * 500
+    chunks = chunk_document(f"<TABLE><TR><TE>{text}</TE></TR></TABLE>")
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 1800 and chunk.endswith("\n| --- |") for chunk in chunks)
+    assert "".join(chunk.splitlines()[0][2:-2] for chunk in chunks) == text.replace(
+        "\\", "\\\\").replace("|", "\\|")
+
+
+def test_oversized_table_preserves_values_under_their_column_headings():
+    markup = """<table><thead><tr><th>만기 상환 대상자</th><th>조기 상환 요청 금액</th></tr></thead>
+        <tr><td>원금 Z1</td><td>금액 70</td></tr>
+        <tr><td>원금 X2</td><td>금액 80</td></tr></table>"""
+    chunks = chunk_document(markup, max_chars=35)
+    assert all(len(chunk) <= 35 for chunk in chunks)
+    columns = {}
+    for chunk in chunks:
+        heading, separator, *rows = chunk.splitlines()
+        assert separator == "| --- |"
+        columns.setdefault(heading, []).extend(rows)
+    assert columns == {
+        "| 만기 상환 대상자 |": ["| 원금 Z1 |", "| 원금 X2 |"],
+        "| 조기 상환 요청 금액 |": ["| 금액 70 |", "| 금액 80 |"],
+    }
+
+
 def test_kiwi_runs_in_to_thread_and_builds_searchable_tsvector(db, monkeypatch):
     main_thread = threading.get_ident()
     kiwi = MagicMock()
