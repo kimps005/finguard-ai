@@ -110,13 +110,17 @@ h1 { font-size: clamp(26px, 4vw, 36px); font-weight: 780; letter-spacing: -.06em
 .outlook-price span { margin-left: 3px; font-size: .52em; font-weight: 700; }
 .outlook-returns { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; color: var(--label); font-size: 13px; font-weight: 700; }
 .outlook-reason { margin-top: 9px; color: var(--body); font-size: 14px; line-height: 1.55; }
-.outlook-gauge, .outlook-evidence { margin-top: 10px; padding: 14px 20px; color: var(--body); font-size: 13px; }
-.outlook-gauge > p { text-align: center; }
-.outlook-gauge strong { color: var(--ink); }
-.outlook-track { position: relative; height: 6px; margin: 13px 7px 10px; border-radius: 6px; background: linear-gradient(90deg, #3182f6, #dfe6f3 50%, #f04452); }
-.outlook-marker { position: absolute; top: 50%; width: 15px; height: 15px; transform: translate(-50%, -50%); border-radius: 50%; border: 2px solid white; background: var(--ink); box-shadow: 0 0 0 1px var(--ink); }
-.outlook-endpoints { display: flex; justify-content: space-between; gap: 10px; }
-.outlook-endpoints span:last-child { text-align: right; }
+.outlook-chart, .outlook-evidence { margin-top: 10px; padding: 14px 20px; color: var(--body); font-size: 13px; }
+.outlook-chart { margin-bottom: 10px; min-width: 0; }
+.outlook-chart-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.outlook-chart-header h2 { font-size: 16px; font-weight: 700; color: var(--ink); }
+.outlook-chart-quote { padding: 5px 10px; border-radius: 8px; background: #F2F4F6; }
+.outlook-chart-quote strong { color: var(--ink); }
+.outlook-chart-details { display: flex; flex-wrap: wrap; gap: 4px 14px; min-height: 28px; margin-top: 8px; color: #8B95A1; }
+.outlook-chart-details strong { color: var(--body); font-weight: 600; }
+.outlook-chart-plot { position: relative; }
+.outlook-chart-canvas { width: 100%; height: clamp(240px, 38vw, 340px); }
+.outlook-chart-plot > p { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
 .outlook-evidence h3 { color: var(--ink); font-weight: 750; }
 .outlook-evidence ul { display: grid; gap: 4px; margin-top: 9px; padding-left: 17px; list-style: disc; }
 .outlook-evidence a { margin-left: 7px; color: #1b64c9; text-decoration: underline; overflow-wrap: anywhere; }

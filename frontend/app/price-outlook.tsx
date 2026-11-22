@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { RefreshCw, Search } from "lucide-react";
+import TossTenMinuteChart from "./toss-ten-minute-chart";
 import {
   readChatEvents, type DecimalString, type Holding, type StockPriceBand,
   type StockPriceBands, type StockSearchResult,
@@ -58,17 +59,6 @@ function BandCards({ band }: { band: StockPriceBand }) {
             <p className="outlook-reason">{level.reason}</p>
           </article>
         ))}
-      </div>
-      <div className="outlook-gauge rounded-2xl bg-white" role="img"
-        aria-label={`저점 ${won.format(buy.price)}원, 분석 시점 현재가 ${won.format(band.current_price)}원, 고점 ${won.format(sell.price)}원. 밴드 위치 ${band.position_pct}%`}>
-        <p>분석 시점 현재가 <strong>{won.format(band.current_price)}원</strong></p>
-        <div className="outlook-track" aria-hidden="true">
-          <span className="outlook-marker" style={{ left: `${band.position_pct}%` }} />
-        </div>
-        <div className="outlook-endpoints" aria-hidden="true">
-          <span>여기서 사라 <strong>{won.format(buy.price)}원</strong></span>
-          <span>여기서 팔아라 <strong>{won.format(sell.price)}원</strong></span>
-        </div>
       </div>
       {(band.ma20 !== null || band.recent_range || band.flow || band.disclosures.length > 0) && (
         <section className="outlook-evidence rounded-2xl bg-white" aria-label="핵심 근거">
@@ -338,7 +328,7 @@ export default function PriceOutlook({ pin, pinHeader, holdings, onUnauthorized 
           <p className="outlook-kicker">1개월 단기 매매 타점</p>
           <h1 id="price-outlook-title">{band?.name ?? selected.corp_name} <span>({selected.stock_code})</span></h1>
           {band && <p className="outlook-quote">
-            <strong>{won.format(band.current_price)}원</strong>
+            <span>분석 시점 <strong>{won.format(band.current_price)}원</strong></span>
             {band.change_pct !== null && <span className="return-badge"
               data-direction={band.change_pct.startsWith("-") ? "loss" : /[1-9]/.test(band.change_pct) ? "gain" : "flat"}>
               전일 대비 {signedPercent(band.change_pct)}
@@ -357,6 +347,8 @@ export default function PriceOutlook({ pin, pinHeader, holdings, onUnauthorized 
       {result && <div className="outlook-meta">
         <time dateTime={result.as_of}>{analyzedAt.format(new Date(result.as_of))} 분석 기준</time>
       </div>}
+      <TossTenMinuteChart key={selected.stock_code} stockCode={selected.stock_code} band={band}
+        pin={pin} pinHeader={pinHeader} onUnauthorized={onUnauthorized} />
       {band && <BandCards band={band} />}
     </section>
   );

@@ -113,6 +113,16 @@ class DailyBar:
     volume: Decimal
 
 
+@dataclass
+class Candle:
+    time: date
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal
+
+
 @dataclass(frozen=True)
 class InvestorFlow:
     session: date
@@ -464,6 +474,77 @@ class BrokerConnector:
                                          start, end, asset_type)
         return tuple(sorted((bar for bar in bars if start <= bar.session <= end),
                             key=lambda bar: bar.session))
+
+    async def get_ten_minute_candles(self, stock_code: str):
+        code, _ = self._market_symbol(stock_code, None)
+        now = self.clock().astimezone(KST)
+        calendar = krx_calendar()
+        session = calendar.date_to_session(now.date(), direction="previous")
+        if now < calendar.session_open(session):
+            session = calendar.previous_session(session)
+        close = calendar.session_close(session).astimezone(KST).to_pydatetime()
+        cursor = min(now, close)
+        historical = session.date() != now.date()
+        if historical:
+            return await self._minute_candles(code, cursor, historical=True)
+        candles = await self._minute_candles(code, cursor)
+        if candles:
+            return candles
+        if now >= close:
+            return await self._minute_candles(code, close, historical=True)
+        previous = calendar.previous_session(session)
+        previous_close = calendar.session_close(previous).astimezone(KST).to_pydatetime()
+        return await self._minute_candles(code, previous_close, historical=True)
+
+    async def _minute_candles(self, code: str, cursor: datetime, *, historical=False):
+        endpoint, tr_id = "inquire-time-itemchartprice", "FHKST03010200"
+        params = {"FID_PW_DATA_INCU_YN": "Y", "FID_ETC_CLS_CODE": ""}
+        if historical:
+            endpoint, tr_id = "inquire-time-dailychartprice", "FHKST03010230"
+            params = {"FID_PW_DATA_INCU_YN": "N", "FID_FAKE_TICK_INCU_YN": "",
+                      "FID_INPUT_DATE_1": day_string(cursor.date())}
+
+        session = cursor.date()
+        start = cursor.replace(minute=cursor.minute // 10 * 10, second=0, microsecond=0) - timedelta(minutes=110)
+        minutes = {}
+        for _ in range(2 if historical else 5):
+            body = await self._market(endpoint, tr_id, code,
+                                      params | {"FID_INPUT_HOUR_1": cursor.strftime("%H%M%S")})
+            page = {}
+            for row in body["output2"]:
+                if row.get("stck_bsop_date") != day_string(session) or not row.get("stck_cntg_hour"):
+                    continue
+                stamp = datetime.strptime(row["stck_bsop_date"] + row["stck_cntg_hour"],
+                                          "%Y%m%d%H%M%S").replace(tzinfo=KST)
+                if stamp > cursor:
+                    continue
+                values = tuple(number(row[field]) for field in (
+                    "stck_oprc", "stck_hgpr", "stck_lwpr", "stck_prpr", "cntg_vol",
+                ))
+                if min(values[:4]) > ZERO and values[4] >= ZERO:
+                    page[stamp] = values
+            if not page:
+                break
+            minutes.update(page)
+            cursor = min(page) - timedelta(seconds=1)
+            if cursor < start or len(body["output2"]) < (120 if historical else 30):
+                break
+
+        candles: dict[datetime, Candle] = {}
+        for stamp in sorted(minutes):
+            if stamp < start:
+                continue
+            open_, high, low, close, volume = minutes[stamp]
+            bucket = stamp.replace(minute=stamp.minute // 10 * 10, second=0, microsecond=0)
+            if bucket not in candles:
+                candles[bucket] = Candle(bucket, open_, high, low, close, volume)
+            else:
+                candle = candles[bucket]
+                candle.high = max(candle.high, high)
+                candle.low = min(candle.low, low)
+                candle.close = close
+                candle.volume += volume
+        return list(candles.values())
 
     async def get_five_day_flow(self, stock_code: str, *, as_of: datetime | None = None,
                                  asset_type=None) -> FiveDayFlow:
