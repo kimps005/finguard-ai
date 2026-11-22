@@ -267,7 +267,10 @@ async def evaluate(dataset, *, dry_run, judge_model):
         from ragas.llms import llm_factory
         from ragas.metrics.collections import ContextPrecision, Faithfulness
 
-        async with AsyncOpenAI() as judge, indexed_corpus(dataset["cases"]):
+        async with AsyncOpenAI(
+            api_key=os.environ["GEMINI_API_KEY"],
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        ) as judge, indexed_corpus(dataset["cases"]):
             llm = llm_factory(judge_model, client=judge)
             faithful = Faithfulness(llm=llm)
             precision = ContextPrecision(llm=llm)
@@ -281,7 +284,7 @@ async def evaluate(dataset, *, dry_run, judge_model):
                                           retrieved_contexts=disclosures) if disclosures else None
                 results.append(case_result(case, f.value if f else 0.0, p.value if p else 0.0, checks))
         return {**summarize(dataset, results, "live"), "judge_model": judge_model,
-                "answer_model": os.getenv("OPENAI_MODEL") or "gpt-4o-mini"}
+                "answer_model": stock_analysis.gemini_model()}
 
 
 def case_result(case, faithfulness, precision, checks):
@@ -317,11 +320,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, default=DATASET)
     parser.add_argument("--dry-run", action="store_true", help="Use offline fixture retrieval and scoring")
-    parser.add_argument("--judge-model", default=os.getenv("RAGAS_JUDGE_MODEL") or "gpt-4o-mini")
+    parser.add_argument("--judge-model", default=os.getenv("RAGAS_JUDGE_MODEL") or stock_analysis.gemini_model())
     parser.add_argument("--format", choices=("json", "markdown"), default="json")
     args = parser.parse_args()
-    if not args.dry_run and not os.getenv("OPENAI_API_KEY"):
-        parser.error("OPENAI_API_KEY is required for live evaluation")
+    if not args.dry_run and not os.getenv("GEMINI_API_KEY", "").strip():
+        parser.error("GEMINI_API_KEY is required for live evaluation")
     policy = asyncio.SelectorEventLoop if sys.platform == "win32" else None
     try:
         with asyncio.Runner(loop_factory=policy) as runner:

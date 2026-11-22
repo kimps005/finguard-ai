@@ -1,1 +1,4 @@
 ragas==0.3.9
+# RAGAS imports the legacy VertexAI module. Keep the model loader's Hub version compatible.
+langchain-community>=0.3,<0.4
+huggingface-hub>=0.34,<1

@@ -128,12 +128,12 @@ OpenDART 공개 공시에서 전환사채·신주인수권부사채 발행, 유�
 
 Dry-run은 고정 검색 순위와 발췌 답변으로 검증 점수를 계산합니다. 실제 그래프, 인용 검증, SSE 토큰 재구성, 최종 Markdown 채점은 두 모드에서 모두 실행됩니다. 자동 채점기는 오버행 희석률·보유 평단가·예상 평단가·100점 스코어카드 각각을 Decimal 값으로 대조합니다. 예상 평단가는 화면과 동일하게 소수 둘째 자리로 반올림하며, 누락·중복·불일치는 각각 해당 항목의 오류로 집계합니다.
 
-실측은 연결한 PostgreSQL의 임시 스키마에 발췌 코퍼스를 색인하고 운영 코드의 임베딩·하이브리드 검색·리랭킹·답변 생성을 실행합니다. Faithfulness는 가드레일을 거친 워커 답변과 제공 컨텍스트를, Context Precision은 검색 순서와 기준 답변을 비교합니다. 실측에는 public 스키마에 pgvector가 활성화된 DB, 스키마 생성 권한, CUDA GPU, OPENAI_API_KEY가 필요합니다. OPENAI_MODEL과 --judge-model로 각각 답변 모델과 채점 모델을 지정합니다. [RAGAS Faithfulness](https://docs.ragas.io/en/v0.3.9/concepts/metrics/available_metrics/faithfulness/) · [RAGAS Context Precision](https://docs.ragas.io/en/v0.3.9/concepts/metrics/available_metrics/context_precision/)
+실측은 연결한 PostgreSQL의 임시 스키마에 발췌 코퍼스를 색인하고 운영 코드의 임베딩·하이브리드 검색·리랭킹·답변 생성을 실행합니다. Faithfulness는 가드레일을 거친 워커 답변과 제공 컨텍스트를, Context Precision은 검색 순서와 기준 답변을 비교합니다. 실측에는 public 스키마에 pgvector가 활성화된 DB, 스키마 생성 권한, CUDA GPU, `GEMINI_API_KEY`가 필요합니다. 답변과 채점은 `GEMINI_MODEL`을 사용하며, `--judge-model`로 채점 모델을 지정할 수 있습니다. [RAGAS Faithfulness](https://docs.ragas.io/en/v0.3.9/concepts/metrics/available_metrics/faithfulness/) · [RAGAS Context Precision](https://docs.ragas.io/en/v0.3.9/concepts/metrics/available_metrics/context_precision/)
 
 ```powershell
 .\.venv\Scripts\python.exe -X utf8 scripts/eval_ragas.py --dry-run --format markdown
 .\.venv\Scripts\pip.exe install -r scripts/requirements-eval.txt
-.\.venv\Scripts\python.exe -X utf8 scripts/eval_ragas.py --judge-model gpt-4o-mini --format markdown
+.\.venv\Scripts\python.exe -X utf8 scripts/eval_ragas.py --judge-model gemini-3.8-flash --format markdown
 ```
 
 ### SSE 지연시간
