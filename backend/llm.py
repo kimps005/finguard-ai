@@ -22,6 +22,7 @@ Role = Literal["router", "worker", "synthesizer"]
 DEFAULTS = {"router": "qwen3.7-plus", "worker": "qwen3.8-flash", "synthesizer": "gemini-3.8-flash"}
 BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 SYNTHESIZER_RETRY_DELAYS = (1.5, 3.0, 6.0)
+QWEN_THINKING_BUDGET = 2048
 logger = logging.getLogger(__name__)
 
 
@@ -133,9 +134,12 @@ async def invoke_gemini(role, model, messages, schema):
 async def invoke_dashscope(model, key, messages, schema, *, timeout):
     if not key:
         raise LLMUnavailable("DashScope API key is missing", reason="API키 미설정")
+    options = {}
+    if model in (DEFAULTS["router"], DEFAULTS["worker"]):
+        options["extra_body"] = {"thinking_budget": QWEN_THINKING_BUDGET}
     client = await asyncio.to_thread(
         ChatOpenAI, api_key=key, base_url=os.getenv("DASHSCOPE_BASE_URL", "").strip() or BASE_URL,
-        model=model, temperature=0, timeout=timeout, max_retries=0,
+        model=model, temperature=0, timeout=timeout, max_retries=0, **options,
     )
     instruction = f"다음 스키마에 맞는 JSON 객체를 반환하라.\n{json.dumps(schema.model_json_schema(), ensure_ascii=False)}"
     json_messages = [("system", f"{messages[0][1]}\n\n{instruction}"), *messages[1:]]

@@ -119,7 +119,8 @@ def test_dashscope_quota_falls_back_once_to_gemini(monkeypatch, role, model, sta
     result = asyncio.run(llm.invoke(role, "분류", "공시", Intent))
     assert result.intent_type == "deep_diagnosis"
     assert dash.call_args.kwargs == dict(api_key="dash-key", model=model, base_url=llm.BASE_URL,
-                                         temperature=0, timeout=45 if role == "worker" else 15, max_retries=0)
+                                         temperature=0, timeout=45 if role == "worker" else 15, max_retries=0,
+                                         extra_body={"thinking_budget": llm.QWEN_THINKING_BUDGET})
     assert google.call_args.kwargs["model"] == "gemini-3.8-flash"
     assert google.call_args.kwargs["google_api_key"] == "gemini-key"
     primary.assert_awaited_once()

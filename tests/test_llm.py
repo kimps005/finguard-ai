@@ -129,6 +129,7 @@ def test_dashscope_parses_json_content_without_a_tool_call(monkeypatch):
     assert result == Analysis(analysis_text="공시 위험 진단", citations=["DOC-1"])
     payload = request.await_args.kwargs
     assert payload["response_format"] == {"type": "json_object"}
+    assert payload["extra_body"] == {"thinking_budget": llm.QWEN_THINKING_BUDGET}
     assert "tools" not in payload
     assert "analysis_text" in payload["messages"][0]["content"]
     assert payload["messages"][1] == {"role": "user", "content": "공시"}
