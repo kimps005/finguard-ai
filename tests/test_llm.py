@@ -1,10 +1,11 @@
 import asyncio
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, call
 
 from google.genai.errors import ServerError
-from httpx import Request
+from httpx import ReadTimeout, Request
 from langchain_core.messages import AIMessage
 from langchain_openai.chat_models.base import OpenAITimeoutError
+from openai import APITimeoutError
 from pydantic import BaseModel
 import pytest
 
@@ -16,46 +17,93 @@ class Analysis(BaseModel):
     citations: list[str]
 
 
-def test_worker_switches_to_gemini_on_openai_timeout(monkeypatch):
-    monkeypatch.delenv("WORKER_MODEL", raising=False)
+@pytest.mark.parametrize("error_type", [OpenAITimeoutError, APITimeoutError, ReadTimeout])
+def test_worker_retries_timeout_then_switches_to_router(monkeypatch, error_type):
+    for name in ("WORKER_MODEL", "ROUTER_MODEL"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("DASHSCOPE_API_KEY", "test")
-    primary = Mock()
-    request = AsyncMock(side_effect=OpenAITimeoutError(Request("POST", llm.BASE_URL)))
-    primary.return_value.with_structured_output.return_value.ainvoke = request
-    monkeypatch.setattr(llm, "ChatOpenAI", primary)
+    http_request = Request("POST", llm.BASE_URL)
+    timeout = ReadTimeout("timed out", request=http_request) if error_type is ReadTimeout else error_type(http_request)
     expected = Analysis(analysis_text="공시 위험 진단", citations=["DOC-1"])
+    primary = Mock()
+    request = AsyncMock(side_effect=[timeout, timeout])
+    primary.with_structured_output.return_value.ainvoke = request
+    router = Mock()
     fallback = AsyncMock(return_value=expected)
-    monkeypatch.setattr(llm, "invoke_gemini", fallback)
+    router.with_structured_output.return_value.ainvoke = fallback
+    client = Mock(side_effect=[primary, primary, router])
+    monkeypatch.setattr(llm, "ChatOpenAI", client)
 
     assert asyncio.run(llm.invoke("worker", "진단", "공시", Analysis)) == expected
-    assert primary.call_args.kwargs["model"] == "qwen3.8-flash"
-    assert primary.call_args.kwargs["timeout"] == 45.0
-    assert primary.call_args.kwargs["max_retries"] == 0
-    request.assert_awaited_once()
-    fallback.assert_awaited_once_with("worker", "gemini-3.5-flash-lite", request.await_args.args[0], Analysis)
+    assert [entry.kwargs["model"] for entry in client.call_args_list] == [
+        "qwen3.8-flash", "qwen3.8-flash", "qwen3.7-plus",
+    ]
+    assert all(entry.kwargs["timeout"] == 45.0 for entry in client.call_args_list)
+    assert all(entry.kwargs["max_retries"] == 0 for entry in client.call_args_list)
+    messages = [("system", "진단"), ("human", "공시")]
+    assert request.await_args_list == [call(messages)] * 2
+    fallback.assert_awaited_once_with(messages)
 
 
-def test_synthesis_switches_model_once_on_capacity_error(monkeypatch, caplog):
+def test_synthesis_recovers_on_third_gemini_attempt(monkeypatch, caplog):
     monkeypatch.delenv("SYNTHESIZER_MODEL", raising=False)
     monkeypatch.setenv("GEMINI_API_KEY", "private-test-key")
     text = "### 핵심 답변\n매물 부담이 커질 수 있습니다.\n### 판단 근거\n전환 가능 물량"
     raw = AIMessage(content=[{"type": "text", "text": text}])
+    unavailable = ServerError(503, {"error": {"message": "high demand private-test-key", "status": "UNAVAILABLE"}})
     request = AsyncMock(side_effect=[
-        ServerError(503, {"error": {"message": "high demand private-test-key", "status": "UNAVAILABLE"}}),
+        unavailable, unavailable,
         {"raw": raw, "parsed": None, "parsing_error": ValueError("expected JSON")},
     ])
     client = Mock()
     client.return_value.with_structured_output.return_value.ainvoke = request
     monkeypatch.setattr(llm, "ChatGoogleGenerativeAI", client)
+    sleep = AsyncMock()
+    monkeypatch.setattr(llm.asyncio, "sleep", sleep)
+    monkeypatch.setattr(llm.random, "uniform", Mock(return_value=0.1))
+    dashscope = Mock()
+    monkeypatch.setattr(llm, "ChatOpenAI", dashscope)
 
     assert asyncio.run(llm.invoke("synthesizer", "진단", "공시", Analysis)).analysis_text == text
-    assert [call.kwargs["model"] for call in client.call_args_list] == [
-        "gemini-3.8-flash", llm.GEMINI_CAPACITY_FALLBACK,
-    ]
-    assert request.await_args_list[0] == request.await_args_list[1]
+    assert [entry.kwargs["model"] for entry in client.call_args_list] == ["gemini-3.8-flash"] * 3
+    assert request.await_args_list == [request.await_args] * 3
+    assert sleep.await_args_list == [call(1.6), call(3.1)]
+    dashscope.assert_not_called()
     assert request.await_args.kwargs["safety_settings"]
     assert "503" in caplog.text and "high demand [REDACTED]" in caplog.text
     assert "private-test-key" not in caplog.text
+
+
+@pytest.mark.parametrize(("status", "override", "expected_model"), [
+    (503, None, "qwen3.7-plus"),
+    (504, "qwen-custom", "qwen-custom"),
+])
+def test_synthesis_switches_to_dashscope_after_three_failed_retries(
+    monkeypatch, status, override, expected_model,
+):
+    for name in ("SYNTHESIZER_MODEL", "SYNTHESIZER_FALLBACK_MODEL", "ROUTER_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+    if override:
+        monkeypatch.setenv("SYNTHESIZER_FALLBACK_MODEL", override)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test")
+    gemini = AsyncMock(side_effect=ServerError(status, {"error": {"message": "high demand"}}))
+    monkeypatch.setattr(llm, "invoke_gemini", gemini)
+    sleep = AsyncMock()
+    monkeypatch.setattr(llm.asyncio, "sleep", sleep)
+    monkeypatch.setattr(llm.random, "uniform", Mock(return_value=0))
+    expected = Analysis(analysis_text="공시 위험 진단", citations=["DOC-1"])
+    dashscope = Mock()
+    request = AsyncMock(return_value=expected)
+    dashscope.return_value.with_structured_output.return_value.ainvoke = request
+    monkeypatch.setattr(llm, "ChatOpenAI", dashscope)
+
+    assert asyncio.run(llm.invoke("synthesizer", "진단", "공시", Analysis)) == expected
+    messages = [("system", "진단"), ("human", "공시")]
+    assert gemini.await_args_list == [call("synthesizer", "gemini-3.8-flash", messages, Analysis)] * 4
+    assert sleep.await_args_list == [call(1.5), call(3.0), call(6.0)]
+    dashscope.assert_called_once()
+    assert dashscope.call_args.kwargs["model"] == expected_model
+    request.assert_awaited_once_with(messages)
 
 
 @pytest.mark.parametrize(("metadata", "reason"), [

@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import random
 import re
 import traceback
 from typing import Literal
@@ -18,7 +19,7 @@ from pydantic import ValidationError
 Role = Literal["router", "worker", "synthesizer"]
 DEFAULTS = {"router": "qwen3.7-plus", "worker": "qwen3.8-flash", "synthesizer": "gemini-3.8-flash"}
 BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-GEMINI_CAPACITY_FALLBACK = "gemini-3.5-flash-lite"
+SYNTHESIZER_RETRY_DELAYS = (1.5, 3.0, 6.0)
 logger = logging.getLogger(__name__)
 
 
@@ -127,36 +128,53 @@ async def invoke_gemini(role, model, messages, schema):
         ) from (result["parsing_error"] or exc)
 
 
+async def invoke_dashscope(model, key, messages, schema, *, timeout):
+    if not key:
+        raise LLMUnavailable("DashScope API key is missing", reason="API키 미설정")
+    client = await asyncio.to_thread(
+        ChatOpenAI, api_key=key, base_url=os.getenv("DASHSCOPE_BASE_URL", "").strip() or BASE_URL,
+        model=model, temperature=0, timeout=timeout, max_retries=0,
+    )
+    answer = await client.with_structured_output(schema, method="function_calling").ainvoke(messages)
+    return schema.model_validate(answer)
+
+
 async def invoke(role: Role, instruction: str, context: str, schema):
     """Use the same structured schema and sanitized messages on both providers."""
     messages = [("system", instruction), ("human", context)]
     key = os.getenv("DASHSCOPE_API_KEY", "").strip()
     model = model_name(role)
     try:
-        if role != "synthesizer" and key:
-            client = await asyncio.to_thread(
-                ChatOpenAI, api_key=key, base_url=os.getenv("DASHSCOPE_BASE_URL", "").strip() or BASE_URL,
-                model=model, temperature=0, timeout=45.0 if role == "worker" else 15, max_retries=0)
-            try:
-                # DashScope supports OpenAI-compatible function calling.
-                answer = await client.with_structured_output(schema, method="function_calling").ainvoke(messages)
-                return schema.model_validate(answer)
-            except Exception as exc:
-                if role == "worker" and isinstance(exc, (APITimeoutError, TimeoutException)):
-                    log_failure(role, model, exc)
-                    model = GEMINI_CAPACITY_FALLBACK
+        if role == "synthesizer":
+            for attempt in range(len(SYNTHESIZER_RETRY_DELAYS) + 1):
+                try:
                     return await invoke_gemini(role, model, messages, schema)
+                except Exception as exc:
+                    if http_status(exc) not in (503, 504):
+                        raise
+                    log_failure(role, model, exc)
+                if attempt < len(SYNTHESIZER_RETRY_DELAYS):
+                    delay = SYNTHESIZER_RETRY_DELAYS[attempt]
+                    await asyncio.sleep(delay + random.uniform(0, delay * 0.25))
+            model = os.getenv("SYNTHESIZER_FALLBACK_MODEL", "").strip() or model_name("router")
+            return await invoke_dashscope(model, key, messages, schema, timeout=60)
+
+        if key:
+            try:
+                if role == "worker":
+                    for _ in range(2):
+                        try:
+                            return await invoke_dashscope(model, key, messages, schema, timeout=45.0)
+                        except (APITimeoutError, TimeoutException) as exc:
+                            log_failure(role, model, exc)
+                    model = model_name("router")
+                    return await invoke_dashscope(model, key, messages, schema, timeout=45.0)
+                return await invoke_dashscope(model, key, messages, schema, timeout=15)
+            except Exception as exc:
                 if not quota_error(exc):
                     raise
                 log_failure(role, model, exc)
         model = model_name("synthesizer")
-        try:
-            return await invoke_gemini(role, model, messages, schema)
-        except Exception as exc:
-            if role != "synthesizer" or http_status(exc) not in (503, 504) or model == GEMINI_CAPACITY_FALLBACK:
-                raise
-            log_failure(role, model, exc)
-        model = GEMINI_CAPACITY_FALLBACK
         return await invoke_gemini(role, model, messages, schema)
     except Exception as exc:
         log_failure(role, model, exc)
