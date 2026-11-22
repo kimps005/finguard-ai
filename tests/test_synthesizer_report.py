@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 from backend import dart_rag, llm, stock_analysis
 from backend.main import chat_events
 from backend.portfolio_graph import build_graph
-from test_module6_langgraph import RECEIPT, parse_frame, position, setup_market
+from test_module6_langgraph import RECEIPT, gemini_result, parse_frame, position, setup_market
 
 
 def test_synthesis_and_local_fallback_use_the_same_report_format(monkeypatch):
@@ -18,11 +18,11 @@ def test_synthesis_and_local_fallback_use_the_same_report_format(monkeypatch):
     dart_rag.search.return_value.append(
         {"rcept_no": unused_receipt, "report_nm": "미사용 공시", "chunk_text": "별개의 공시"})
     synthesizer = llm.ChatGoogleGenerativeAI.return_value.with_structured_output.return_value.ainvoke
-    synthesizer.return_value = stock_analysis.Analysis(
+    synthesizer.return_value = gemini_result(stock_analysis.Analysis(
         analysis_text="### 핵심 답변\n\n전환 물량이 출회되면 매물 부담이 커질 수 있습니다 [DOC-1]."
                       "\n\n### 판단 근거\n\n- [DOC-1] 전환 물량\n- [DOC-2] 미사용 공시",
         citations=["DOC-1"],
-    )
+    ))
 
     async def collect(query):
         return [parse_frame(frame) async for frame in chat_events(
@@ -51,3 +51,4 @@ def test_synthesis_and_local_fallback_use_the_same_report_format(monkeypatch):
             "DOC-2", unused_receipt, "미사용 공시", "기준금리", "종목 뉴스",
             "총 평가액", "3,557.727272원", "종합 LLM"))
         assert any("종합 LLM" in warning for warning in done["guardrail_warnings"]) == outage
+        assert any("[응답 시간초과]" in warning for warning in done["guardrail_warnings"]) == outage

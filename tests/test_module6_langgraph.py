@@ -7,6 +7,7 @@ from time import perf_counter
 from unittest.mock import AsyncMock, Mock, create_autospec
 
 import httpx
+from langchain_core.messages import AIMessage
 import pytest
 
 from backend import dart_rag, llm, portfolio_market, stock_analysis
@@ -25,6 +26,10 @@ from backend.sync_stock_master import Stock
 NOW = datetime(2026, 11, 20, 16, tzinfo=KST)
 DAY = NOW.date()
 RECEIPT = "20261120000001"
+
+
+def gemini_result(answer):
+    return {"parsed": answer, "raw": AIMessage(content=""), "parsing_error": None}
 
 
 def position(code="000001", *, asset="STOCK", weight="0.2"):
@@ -76,7 +81,7 @@ def setup_market(monkeypatch, positions):
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-test")
     router = AsyncMock(side_effect=classify)
     worker = AsyncMock(return_value=stock_analysis.Analysis(**answer))
-    summary = AsyncMock(return_value=stock_analysis.Analysis(analysis_text="종합 분석입니다.", citations=[]))
+    summary = AsyncMock(return_value=gemini_result(stock_analysis.Analysis(analysis_text="종합 분석입니다.", citations=[])))
     dash = Mock()
     dash.return_value.with_structured_output.side_effect = lambda schema, **_: Mock(
         ainvoke=router if schema is Intent else worker)
@@ -106,7 +111,7 @@ def test_dashscope_quota_falls_back_once_to_gemini(monkeypatch, role, model, sta
                            body=body)
     dash, google = Mock(), Mock()
     primary = AsyncMock(side_effect=error)
-    fallback = AsyncMock(return_value=Intent(intent_type="deep_diagnosis"))
+    fallback = AsyncMock(return_value=gemini_result(Intent(intent_type="deep_diagnosis")))
     dash.return_value.with_structured_output.return_value.ainvoke = primary
     google.return_value.with_structured_output.return_value.ainvoke = fallback
     monkeypatch.setattr(llm, "ChatOpenAI", dash)
@@ -242,8 +247,8 @@ def test_top_three_worker_isolation_guardrail_and_repeated_requests(monkeypatch)
     graph = build_graph(market)
 
     synthesis = llm.ChatGoogleGenerativeAI.return_value.with_structured_output.return_value.ainvoke
-    synthesis.return_value = stock_analysis.Analysis(
-        analysis_text="[DOC-1] 첫 근거입니다. [DOC-3] 다른 종목의 근거입니다.", citations=["DOC-1", "DOC-3"])
+    synthesis.return_value = gemini_result(stock_analysis.Analysis(
+        analysis_text="[DOC-1] 첫 근거입니다. [DOC-3] 다른 종목의 근거입니다.", citations=["DOC-1", "DOC-3"]))
     async def search(corp_code, query):
         return [{"rcept_no": RECEIPT[:-1] + corp_code[-1], "report_nm": "공시",
                  "chunk_text": "2026.11.21 희석률은 3.5%입니다."}]
@@ -395,7 +400,11 @@ def test_total_llm_outage_streams_scores_simulation_and_disclosure_evidence(monk
     assert done["verified_stock_results"][0]["evidence"] == {"DOC-1": RECEIPT}
     report = "".join(data["text"] for kind, data in frames if kind == "token")
     assert report == done["final_report"] and "90/100" in report and "DOC-1" in report and RECEIPT in report
-    assert len(done["guardrail_warnings"]) == 3 and "종합 LLM" in report and "private-provider-detail" not in report
+    warnings = done["guardrail_warnings"]
+    assert len(warnings) == 3
+    reason = "API키 미설정" if missing_keys else "응답 시간초과"
+    assert any("종합 LLM" in warning and f"[{reason}]" in warning for warning in warnings)
+    assert "private-provider-detail" not in str(frames)
     if missing_keys:
         llm.ChatOpenAI.assert_not_called()
         llm.ChatGoogleGenerativeAI.assert_not_called()

@@ -81,8 +81,9 @@ async def analyze_stock(job, external):
               "disclosures": documents, "news": news}
     try:
         return {**await analyze(dump(cloud_context(stock, job["scorecard"], documents))), **result}
-    except llm.LLMUnavailable:
-        return {**result, "analysis_text": "", "citations": [], "llm_unavailable": True}
+    except llm.LLMUnavailable as exc:
+        return {**result, "analysis_text": "", "citations": [], "llm_unavailable": True,
+                "llm_failure_reason": exc.reason}
 
 
 async def synthesize(state):
@@ -111,10 +112,11 @@ async def synthesize(state):
         dump(portfolio), Analysis,
     )
     sections = re.fullmatch(
-        rf"{ANSWER_HEADING}\n(.+?)\n{EVIDENCE_HEADING}\n(.+)", answer.analysis_text.strip(),
-        re.DOTALL)
-    if not sections or any(re.search(r"(?m)^\s*#", section) for section in sections.groups()):
-        raise llm.LLMUnavailable("Invalid synthesis report format")
+        rf"{ANSWER_HEADING}[ \t]*\n(.+?)\n{EVIDENCE_HEADING}[ \t]*\n(.+)",
+        "\n".join(answer.analysis_text.splitlines()).strip(), re.DOTALL,
+    )
+    if not sections or any(not section.strip() or re.search(r"(?m)^\s*#", section) for section in sections.groups()):
+        raise llm.LLMUnavailable("Invalid synthesis report format", reason="응답 형식 오류")
     doc_map = {alias: receipt for receipt, alias in aliases.items()}
     verified = await asyncio.to_thread(verify_results, [{
         "analysis_text": sections[1], "citations": answer.citations, "stock_code": "종합 진단",
@@ -145,7 +147,8 @@ def verify_results(raw, *, preserve_aliases=False):
     verified, warnings = [], []
     for row in raw:
         if row.get("llm_unavailable"):
-            warnings.append(f"{row['stock_code']} 종목 LLM을 사용할 수 없어 정량 결과와 근거 공시를 제공합니다.")
+            reason = row.get("llm_failure_reason", "LLM 호출 오류")
+            warnings.append(f"{row['stock_code']} 종목 LLM을 사용할 수 없어 정량 결과와 근거 공시를 제공합니다. [{reason}]")
         try:
             worker = WorkerResult.model_validate(row, strict=True)
         except ValidationError:

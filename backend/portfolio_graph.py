@@ -277,8 +277,8 @@ def build_graph(market: MarketData):
                 try:
                     summary, disclosures, notes = await stock_analysis.synthesize(state)
                     warnings.extend(notes)
-                except llm.LLMUnavailable:
-                    warnings.append("종합 LLM을 사용할 수 없어 로컬 정량 리포트를 제공합니다.")
+                except llm.LLMUnavailable as exc:
+                    warnings.append(f"종합 LLM을 사용할 수 없어 로컬 정량 리포트를 제공합니다. [{exc.reason}]")
             parts = [diagnosis_report(state, summary, disclosures)]
         for part in parts:
             write({"text": part})
