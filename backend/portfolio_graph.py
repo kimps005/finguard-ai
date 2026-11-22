@@ -99,8 +99,11 @@ async def simulation(query, balance, market):
 
 def report_parts(state):
     summary = state["account_summary"]
-    yield (f"총 평가액 {summary['total_value']:,}원 · 예수금 {summary['cash_deposit']:,}원 "
-           f"({summary['cash_weight']:.2%})\n")
+    if summary["cash_deposit"] is None:
+        yield f"국내 주식 평가액 {summary['total_value']:,}원 · 예수금 조회 불가\n"
+    else:
+        yield (f"총 평가액 {summary['total_value']:,}원 · 예수금 {summary['cash_deposit']:,}원 "
+               f"({summary['cash_weight']:.2%})\n")
     for h in state["holdings"]:
         yield (f"\n- {h['name']} ({h['stock_code']}) · {h['quantity']:,}주 · "
                f"현재가 {h['current_price']:,}원 · 평단가 {h['average_price']:,}원 · "

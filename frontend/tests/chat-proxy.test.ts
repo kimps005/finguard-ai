@@ -98,6 +98,32 @@ test("account proxy forwards the lightweight snapshot without caching", async (t
   assert.equal(upstream.mock.callCount(), 1);
 });
 
+test("account proxy explains missing settings without exposing upstream details", async (t) => {
+  configureProxy(t);
+  let problem = { code: "kis_account_not_configured", mode: "live", message: "private-provider-detail" };
+  t.mock.method(globalThis, "fetch", async () => Response.json(problem, { status: 503 }));
+
+  for (const [mode, key] of [["live", "KIS_ACCOUNT_NO"], ["virtual", "KIS_VIRTUAL_ACCOUNT_NO"]]) {
+    problem = { ...problem, mode };
+    const response = await GET(request("/api/account", "0728"));
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get("Cache-Control"), "no-store");
+    const { message } = await response.json();
+    assert.ok(message.includes(key));
+    assert.ok(!message.includes(problem.message));
+  }
+
+  problem = { ...problem, code: "toss_account_not_configured" };
+  const toss = await GET(request("/api/account", "0728"));
+  assert.equal(toss.status, 503);
+  assert.match((await toss.json()).message, /TOSS_CLIENT_ID.*TOSS_CLIENT_SECRET/);
+
+  problem = { ...problem, code: "unknown_error" };
+  const response = await GET(request("/api/account", "0728"));
+  assert.equal(response.status, 502);
+  assert.ok(!(await response.text()).includes(problem.message));
+});
+
 test("SSE reader preserves split UTF-8, line endings, and GFM table tokens", async () => {
   const markdown = "| 종목 | 예상 평단가 |\n| --- | ---: |\n| 종목A | 1,200원 |\n\n- 공시 확인\n";
   const bytes = encoder.encode(`event: token\r\ndata: ${JSON.stringify({ text: markdown })}\r\n\r\n`

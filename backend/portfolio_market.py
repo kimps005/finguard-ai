@@ -9,7 +9,7 @@ import json
 import psycopg
 from psycopg.rows import dict_row
 
-from backend.broker import KST, LIVE, VIRTUAL, BrokerConnector, DailyBar, FiveDayFlow, Holding, number
+from backend.broker import KST, BrokerConnector, DailyBar, FiveDayFlow, Holding
 from backend.connectors import ExternalConnectors
 from backend.dart_etl import DartETL
 from backend.finance_calc import ANNUAL, THIRD, DartReports, LockupRelease
@@ -122,14 +122,4 @@ class MarketData:
         return balance, on, macro.result(), inputs
 
     async def orderable_cash(self, holding: Holding | None = None) -> Decimal:
-        settings = self.broker.settings
-        domain, credentials, tr_id = (
-            (VIRTUAL, settings.virtual, "VTTC8908R") if settings.is_virtual
-            else (LIVE, settings.live, "TTTC8908R"))
-        payload, _ = await self.broker._get(
-            domain, credentials, "/trading/inquire-psbl-order", tr_id,
-            {"CANO": credentials.account_no, "ACNT_PRDT_CD": credentials.product_code,
-             "PDNO": holding.stock_code if holding else "",
-             "ORD_UNPR": format(holding.current_price, "f") if holding else "0",
-             "ORD_DVSN": "00", "CMA_EVLU_AMT_ICLD_YN": "N", "OVRS_ICLD_YN": "N"})
-        return number(payload["output"]["ord_psbl_cash"])
+        return await self.broker.get_orderable_cash(holding)

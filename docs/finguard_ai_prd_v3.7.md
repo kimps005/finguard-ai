@@ -127,7 +127,8 @@ CREATE TABLE overhang_events (
 
 1. **증권사 Open API 이원화 & Rate Limiting 방어:**
 
-   * 계좌/잔고 조회만 `.env` 내 `IS_VIRTUAL=true/false` 분기를 태우고, 시세·일봉·수급 데이터는 항상 실전 도메인(또는 PyKRX fallback)에서 조회.
+   * `.env`의 기본 계좌 제공자는 `BROKER_PROVIDER=toss`다. 토스증권 Open API로 국내 원화 보유 종목과 매수 가능 금액을 조회한다. 전체 예수금과 현금 비중은 API에서 확인할 수 없으므로 미제공으로 표시한다.
+   * `BROKER_PROVIDER=kis`에서 계좌/잔고 조회는 `IS_VIRTUAL=true/false`로 분기한다. 두 계좌 제공자 모두 시세·일봉·수급 데이터는 KIS 실전 도메인 또는 PyKRX에서 조회한다.
 
    * `asyncio.gather()` 호출 시 `asyncio.Semaphore(2)` + 지수 백오프(Exponential Backoff) 적용.
 

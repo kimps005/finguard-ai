@@ -280,7 +280,7 @@ def simulate_purchase(holding: Holding, balance: Balance, orderable_cash: Decima
         if not price:
             raise ValueError("Purchase price must be positive")
         quantity, cost = _nonnegative(holding.quantity), _nonnegative(holding.purchase_amount)
-        total = _nonnegative(balance.total_value)
+        total = _nonnegative(balance.total_value) if balance.cash_deposit is not None else None
         buy = budget // price
         spent = buy * price
         new_quantity, new_cost = quantity + buy, cost + spent

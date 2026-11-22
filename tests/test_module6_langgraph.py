@@ -75,10 +75,7 @@ def parse_frame(frame):
 @pytest.mark.parametrize("positions", [[], [position(asset="ETF")]])
 def test_account_snapshot_uses_only_balance_and_orderable_cash(monkeypatch, positions):
     market = setup_market(monkeypatch, positions)
-    mock_get = AsyncMock(return_value=({"output": {"ord_psbl_cash": "900.12"}}, {}))
-    market.broker._get = mock_get
-    market.broker.settings = BrokerSettings(is_virtual=True, virtual=Credentials("key", "secret", "12345678"),
-                                            live=Credentials("", "", ""))
+    market.broker.get_orderable_cash.return_value = D("900.12")
     monkeypatch.setattr(app.state, "market", market, raising=False)
 
     async def get_snapshot():
@@ -98,13 +95,34 @@ def test_account_snapshot_uses_only_balance_and_orderable_cash(monkeypatch, posi
         assert snapshot["holdings"][0]["asset_type"] == "ETF"
     else:
         assert snapshot["holdings"] == []
-    mock_get.assert_awaited_once_with(
-        VIRTUAL, market.broker.settings.virtual, "/trading/inquire-psbl-order", "VTTC8908R",
-        {"CANO": "12345678", "ACNT_PRDT_CD": "01", "PDNO": "", "ORD_UNPR": "0",
-         "ORD_DVSN": "00", "CMA_EVLU_AMT_ICLD_YN": "N", "OVRS_ICLD_YN": "N"},
-    )
+    market.broker.get_orderable_cash.assert_awaited_once_with(None)
     market.broker.get_balance.assert_awaited_once_with()
     assert not market.etl.method_calls and not market.external.method_calls
+
+
+@pytest.mark.parametrize("mode", ["live", "virtual"])
+def test_account_snapshot_reports_missing_credentials_before_network_calls(monkeypatch, mode):
+    configured = Credentials("fixture-key", "fixture-secret", "12345678")
+    incomplete = Credentials("fixture-key", "", "12345678")
+    virtual = mode == "virtual"
+    settings = BrokerSettings(configured if virtual else incomplete,
+                              incomplete if virtual else configured, virtual)
+    broker = BrokerConnector(settings, None, None)
+    request_broker = AsyncMock()
+    monkeypatch.setattr(broker, "_get", request_broker)
+    market = MarketData(broker, None, None)
+    monkeypatch.setattr(app.state, "market", market, raising=False)
+
+    async def get_snapshot():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://test") as client:
+            return await client.get("/api/v1/account")
+
+    response = asyncio.run(get_snapshot())
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {"code": "kis_account_not_configured", "mode": mode}
+    request_broker.assert_not_called()
 
 
 def test_fast_path_stream_and_latency(monkeypatch):
@@ -224,10 +242,10 @@ def test_guardrail_citations_at_sentence_end():
 
 @pytest.mark.parametrize("virtual", [True, False])
 def test_orderable_cash_uses_account_credentials_and_decimal(virtual):
-    broker = create_autospec(BrokerConnector, instance=True)
-    broker.settings = BrokerSettings(Credentials("real", "secret", "111"),
-                                     Credentials("paper", "secret", "222"), virtual)
-    broker._get.return_value = ({"output": {"ord_psbl_cash": "1,234.56"}}, {})
+    settings = BrokerSettings(Credentials("real", "secret", "111"),
+                              Credentials("paper", "secret", "222"), virtual)
+    broker = BrokerConnector(settings, None, None)
+    broker._get = AsyncMock(return_value=({"output": {"ord_psbl_cash": "1,234.56"}}, {}))
     cash = asyncio.run(MarketData(broker, None, None).orderable_cash(position()))
     assert cash == D("1234.56")
     domain, credentials, path, tr_id, params = broker._get.await_args.args

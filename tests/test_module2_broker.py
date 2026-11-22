@@ -4,15 +4,16 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import json
 from unittest.mock import AsyncMock
+from urllib.parse import parse_qs
 
 import httpx
 import pandas as pd
 import pytest
 
-from backend.broker import (
-    BrokerConnector, BrokerError, BrokerSettings, KST, LIVE, VIRTUAL,
-)
+from backend.broker import BrokerConfigurationError, BrokerConnector, BrokerError, BrokerSettings, KST, LIVE, VIRTUAL
 from backend.main import app
+from backend.portfolio_market import MarketData
+from backend.toss_broker import TossBrokerConnector, TossSettings
 
 
 class MemoryRedis:
@@ -58,6 +59,83 @@ def market_rows():
          "orgn_ntby_qty": str(-index)}
         for index, session in reversed(list(enumerate(FLOW_SESSIONS, 1)))
     ]
+
+
+def test_toss_snapshot_and_cash_use_documented_read_only_api(settings, monkeypatch):
+    paths = []
+    position = {
+        "symbol": "005930", "name": "Fixture", "marketCountry": "KR", "currency": "KRW",
+        "quantity": "2.5", "lastPrice": "100.25", "averagePurchasePrice": "80.125",
+        "marketValue": {"purchaseAmount": "200.3125", "amount": "250.625"},
+        "profitLoss": {"amount": "50.3125", "rate": "0.25117"},
+    }
+    master = AsyncMock(return_value={"005930": ("STOCK", "00123456", "common")})
+
+    def handle(request):
+        path = request.url.path
+        paths.append(path)
+        assert request.url.host == "openapi.tossinvest.com"
+        if path == "/oauth2/token":
+            assert request.method == "POST"
+            assert request.headers["Content-Type"] == "application/x-www-form-urlencoded"
+            assert parse_qs(request.content.decode()) == {
+                "grant_type": ["client_credentials"], "client_id": ["client-id"],
+                "client_secret": ["client-secret"],
+            }
+            return httpx.Response(200, json={"access_token": "fixture", "expires_in": 3600})
+        assert request.method == "GET"
+        assert request.headers["Authorization"] == "Bearer fixture"
+        if path == "/api/v1/accounts":
+            assert "X-Tossinvest-Account" not in request.headers
+            return httpx.Response(200, json={"result": [{"accountSeq": 7, "accountType": "BROKERAGE"}]})
+        assert request.headers["X-Tossinvest-Account"] == "7"
+        if path == "/api/v1/holdings":
+            return httpx.Response(200, json={"result": {
+                "marketValue": {"amount": {"krw": "250.625", "usd": "10000"}},
+                "items": [position, position | {"symbol": "AAPL", "marketCountry": "US", "currency": "USD"}],
+            }})
+        assert path == "/api/v1/buying-power" and request.url.params["currency"] == "KRW"
+        return httpx.Response(200, json={"result": {"currency": "KRW", "cashBuyingPower": "1234.56"}})
+
+    async def read():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+            connector = TossBrokerConnector(settings, MemoryRedis(), http,
+                                            toss_settings=TossSettings("client-id", "client-secret"),
+                                            stock_master=master)
+            monkeypatch.setattr(app.state, "market", MarketData(connector, None, None), raising=False)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                         base_url="http://local") as client:
+                return await client.get("/api/v1/account")
+
+    response = asyncio.run(read())
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert paths == ["/oauth2/token", "/api/v1/accounts", "/api/v1/holdings", "/api/v1/buying-power"]
+    master.assert_awaited_once_with(["005930"])
+    snapshot = response.json()
+    assert snapshot["account_summary"] == {
+        "total_value": "250.625", "cash_deposit": None, "cash_weight": None, "orderable_cash": "1234.56",
+    }
+    holding, = snapshot["holdings"]
+    assert holding["profit_loss_pct"] == "25.11700" and holding["quantity"] == "2.5"
+    assert holding["weight"] == "1" and holding["corp_code"] == "00123456"
+
+
+def test_toss_requires_account_selection_when_multiple_accounts_are_linked(settings):
+    broker = TossBrokerConnector(settings, MemoryRedis(), None, toss_settings=TossSettings("id", "secret"))
+    broker._toss_get = AsyncMock(return_value=[
+        {"accountSeq": seq, "accountType": "BROKERAGE"} for seq in (2, 7)
+    ])
+    with pytest.raises(BrokerConfigurationError, match="toss_account_selection_required"):
+        asyncio.run(broker.get_balance())
+    broker._toss_get.assert_awaited_once_with("/api/v1/accounts")
+
+    configured = TossBrokerConnector(settings, MemoryRedis(), None, toss_settings=TossSettings("id", "secret", "7"))
+    configured._toss_get = AsyncMock(side_effect=[
+        broker._toss_get.return_value, {"cashBuyingPower": "42"},
+    ])
+    assert asyncio.run(configured.get_orderable_cash()) == Decimal(42)
+    assert configured._toss_get.await_args.kwargs == {"account_seq": "7", "params": {"currency": "KRW"}}
 
 
 @pytest.mark.parametrize("is_virtual", [True, False])

@@ -11,8 +11,8 @@ export interface Holding {
 export interface Portfolio {
   account_summary: {
     total_value: DecimalString;
-    cash_deposit: DecimalString;
-    cash_weight: DecimalString;
+    cash_deposit: DecimalString | null;
+    cash_weight: DecimalString | null;
   };
   holdings: Holding[];
 }

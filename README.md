@@ -18,7 +18,7 @@ flowchart TD
     proxy -->|"POST /api/v1/chat/stream · user_query"| http["FastAPI chat_events"]
     http --> startNode(["START"])
     startNode --> router["router_node"]
-    router -->|"fast_lookup"| fastQuote["fast_quote_node · KIS 잔고 조회"]
+    router -->|"fast_lookup"| fastQuote["fast_quote_node · 증권사 잔고 조회"]
     router -->|"deep_diagnosis / simulation"| market["market_data_node · 보유 종목 시장 데이터, ECOS, DART 동기 인제스트"]
     market --> quant["quant_scorecard_node · Decimal 스코어카드 및 선택적 매수 시뮬레이션"]
     quant --> fanOut["fan_out_node"]
@@ -52,7 +52,11 @@ docker compose up -d --build
 docker compose ps
 ```
 
-POSTGRES_PASSWORD와 APP_ACCESS_PIN을 지정합니다. 종목 마스터 동기화에는 DART_API_KEY와 FSC_SERVICE_KEY가 함께 필요합니다. 계좌에 맞는 KIS 키와 계좌번호를 지정하며, 모의 계좌(IS_VIRTUAL=true)에서도 시장 데이터용 실전 키를 구성합니다. PyKRX 인증 데이터와 공시 분석, 외부 지표에 사용하는 환경 변수는 .env.example에 있습니다. [환경 변수 예시](.env.example)
+POSTGRES_PASSWORD와 APP_ACCESS_PIN을 지정합니다. 종목 마스터 동기화에는 DART_API_KEY와 FSC_SERVICE_KEY가 함께 필요합니다. PyKRX 인증 데이터와 공시 분석, 외부 지표에 사용하는 환경 변수는 .env.example에 있습니다. [환경 변수 예시](.env.example)
+
+기본 계좌 연결은 토스증권입니다. 토스증권 웹의 설정 → Open API에서 발급받은 Client ID와 Client Secret을 저장소 루트의 `.env`에 `TOSS_CLIENT_ID`와 `TOSS_CLIENT_SECRET`으로 입력합니다. 연결된 종합매매 계좌가 하나면 자동 선택합니다. 여러 개면 계좌 목록 API가 반환하는 `accountSeq`를 `TOSS_ACCOUNT_SEQ`에 지정합니다. 설정을 바꾼 뒤 `docker compose up -d backend`를 실행합니다. [토스증권 공식 API 가이드](https://developers.tossinvest.com/docs)
+
+토스증권 연결은 국내 원화 보유 종목과 원화 매수 가능 금액을 조회합니다. API에서 전체 예수금을 제공하지 않아 요약에는 국내 주식 평가액을 표시하며, 전체 계좌 기준 현금 비중과 시뮬레이션 예상 비중은 표시할 수 없습니다. 시장 데이터는 KIS 실전 키가 구성되면 기존 KIS 조회를 사용하고, 실패하거나 키가 없으면 PyKRX로 조회합니다. 한국투자증권 계좌를 연결하려면 `BROKER_PROVIDER=kis`와 해당 계좌의 KIS 설정을 지정합니다. KIS 계좌의 실전·모의 모드는 `IS_VIRTUAL`로 선택합니다.
 
 브라우저에서 [http://127.0.0.1:3000](http://127.0.0.1:3000)을 열고 PIN을 입력합니다. 초기 PostgreSQL 볼륨에는 두 마이그레이션이 적용됩니다. 백엔드 시작 시 Module 4 마이그레이션을 재적용하고, 키가 구성된 경우 종목 마스터를 동기화한 뒤 Uvicorn을 시작합니다. GPU 모델 파일은 data/huggingface에 캐시됩니다.
 

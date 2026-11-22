@@ -121,7 +121,12 @@ export default function Dashboard() {
         lock("접근 PIN을 확인해 주세요.");
         return;
       }
-      if (!response.ok) throw new Error("계좌 정보를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.");
+      if (!response.ok) {
+        const problem = await response.json().catch(() => null);
+        throw new Error(typeof problem?.message === "string" && problem.message
+          ? problem.message
+          : "계좌 정보를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.");
+      }
       const snapshot: AccountSnapshot = await response.json();
       sessionStorage.setItem(PIN_KEY, candidate);
       setAccount(snapshot);
@@ -254,14 +259,17 @@ export default function Dashboard() {
               <section className="panel account-panel" aria-labelledby="account-title">
                 <h2 id="account-title"><Wallet size={17} /> 계좌 요약</h2>
                 <dl>
-                  <div className="account-total"><dt>총 평가액</dt><dd>{won.format(summary.total_value)}<small>원</small></dd></div>
+                  <div className="account-total">
+                    <dt>{summary.cash_deposit === null ? "국내 주식 평가액" : "총 평가액"}</dt>
+                    <dd>{won.format(summary.total_value)}<small>원</small></dd>
+                  </div>
                   <div className="account-cash">
                     <div>
-                      <dt>주문 가능 예수금</dt>
+                      <dt>원화 매수 가능 금액</dt>
                       <dd>{summary.orderable_cash === null ? "조회 불가" : `${won.format(summary.orderable_cash)}원`}</dd>
                       {summary.orderable_cash !== null && <span className="cash-reference">접속 시 조회</span>}
                     </div>
-                    <div><dt>현금 비중</dt><dd>{percent.format(summary.cash_weight)}</dd></div>
+                    <div><dt>현금 비중</dt><dd>{summary.cash_weight === null ? "조회 불가" : percent.format(summary.cash_weight)}</dd></div>
                   </div>
                 </dl>
               </section>

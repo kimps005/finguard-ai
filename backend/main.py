@@ -4,15 +4,16 @@ import os
 from typing import Annotated
 
 from fastapi import FastAPI, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
-from backend.broker import BrokerConnector
+from backend.broker import BrokerConfigurationError, BrokerConnector, BrokerError
 from backend.connectors import ExternalConnectors
 from backend.dart_etl import DartETL
 from backend.portfolio_graph import account_view, build_graph
 from backend.portfolio_market import MarketData
 from backend.stock_analysis import dump
+from backend.toss_broker import TossBrokerConnector, TossSettings
 
 
 logger = logging.getLogger(__name__)
@@ -22,7 +23,14 @@ PUBLIC_FIELDS = ["intent_type", "account_summary", "holdings", "quant_scorecards
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with BrokerConnector.from_env() as broker:
+    provider = os.getenv("BROKER_PROVIDER", "toss").strip().lower()
+    if provider == "toss":
+        connector = TossBrokerConnector.from_env(toss_settings=TossSettings.from_env())
+    elif provider == "kis":
+        connector = BrokerConnector.from_env()
+    else:
+        raise ValueError("BROKER_PROVIDER must be toss or kis")
+    async with connector as broker:
         app.state.broker = broker
         app.state.dart_etl = DartETL(broker.redis, broker.http, os.getenv("DART_API_KEY"))
         app.state.external_connectors = ExternalConnectors.from_env(broker.http, broker.redis)
@@ -42,7 +50,19 @@ def health() -> dict[str, str]:
 @app.get("/api/v1/account")
 async def account_snapshot(request: Request):
     market = request.app.state.market
-    balance = await market.broker.get_balance()
+    try:
+        balance = await market.broker.get_balance()
+    except BrokerConfigurationError as exc:
+        logger.warning("%s", exc)
+        return JSONResponse(
+            {"code": exc.code, "mode": exc.mode},
+            status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+    except BrokerError as exc:
+        logger.warning("Account lookup failed (%s)", type(exc).__name__)
+        return JSONResponse({"code": "account_lookup_failed"}, status_code=502,
+                            headers={"Cache-Control": "no-store"})
     snapshot = account_view(balance)
     orderable_cash = None
     try:

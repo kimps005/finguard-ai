@@ -30,6 +30,13 @@ class BrokerError(RuntimeError):
     pass
 
 
+class BrokerConfigurationError(BrokerError):
+    def __init__(self, code: str, mode: str):
+        self.code = code
+        self.mode = mode
+        super().__init__(f"{code} ({mode})")
+
+
 class RetryableBrokerError(BrokerError):
     pass
 
@@ -81,9 +88,9 @@ class Holding:
 
 @dataclass(frozen=True)
 class Balance:
-    cash_deposit: Decimal
+    cash_deposit: Decimal | None
     total_value: Decimal
-    cash_weight: Decimal
+    cash_weight: Decimal | None
     holdings: tuple[Holding, ...]
 
 
@@ -208,12 +215,12 @@ class BrokerConnector:
 
     @classmethod
     @asynccontextmanager
-    async def from_env(cls):
+    async def from_env(cls, **kwargs):
         settings = BrokerSettings.from_env()
         redis = Redis.from_url(os.getenv("REDIS_URL") or "redis://127.0.0.1:6379/0",
                                socket_timeout=5, socket_connect_timeout=5)
         async with redis, httpx.AsyncClient(timeout=5) as http:
-            yield cls(settings, redis, http)
+            yield cls(settings, redis, http, **kwargs)
 
     async def _retry(self, operation):
         for delay in (*RETRY_DELAYS, None):
@@ -249,6 +256,16 @@ class BrokerConnector:
         fingerprint = sha256(f"{credentials.app_key}\0{credentials.app_secret}".encode()).hexdigest()
         key = f"finguard:kis:oauth:{domain}:{fingerprint}"
 
+        async def issue():
+            body, _ = await self._send("POST", domain + "/oauth2/tokenP", json={
+                "grant_type": "client_credentials",
+                "appkey": credentials.app_key, "appsecret": credentials.app_secret,
+            })
+            return body
+
+        return await self._cached_oauth(key, issue)
+
+    async def _cached_oauth(self, key, issue):
         async def cached():
             raw = await self.redis.get(key)
             if raw:
@@ -270,25 +287,20 @@ class BrokerConnector:
                 if token:
                     return token
                 issued = self.clock()
-                body, _ = await self._retry(lambda: self._send(
-                    "POST", domain + "/oauth2/tokenP", json={
-                        "grant_type": "client_credentials",
-                        "appkey": credentials.app_key, "appsecret": credentials.app_secret,
-                    },
-                ))
+                body = await self._retry(issue)
                 try:
                     token, ttl = body["access_token"], int(body["expires_in"])
                     if not isinstance(token, str) or not token or ttl <= 0:
                         raise ValueError
                 except (KeyError, ValueError, TypeError) as exc:
-                    raise BrokerError("Invalid KIS OAuth response") from exc
+                    raise BrokerError("Invalid broker OAuth response") from exc
                 expiry = issued + timedelta(seconds=ttl)
                 await self.redis.set(key, json.dumps({
                     "access_token": token, "expires_at": expiry.isoformat(),
                 }), ex=ttl)
                 return token
         except RedisError as exc:
-            raise BrokerError("KIS OAuth Redis cache is unavailable") from exc
+            raise BrokerError("Broker OAuth Redis cache is unavailable") from exc
 
     async def _get(self, domain, credentials, path, transaction_id, params, continuation=""):
         token = await self._token(domain, credentials)
@@ -307,8 +319,8 @@ class BrokerConnector:
             (VIRTUAL, self.settings.virtual, "VTTC8434R") if virtual
             else (LIVE, self.settings.live, "TTTC8434R")
         )
-        if not credentials.account_no:
-            raise BrokerError("KIS account number is missing")
+        if not all((credentials.account_no, credentials.app_key, credentials.app_secret)):
+            raise BrokerConfigurationError("kis_account_not_configured", "virtual" if virtual else "live")
         params = {
             "CANO": credentials.account_no, "ACNT_PRDT_CD": credentials.product_code,
             "AFHR_FLPR_YN": "N", "OFL_YN": "", "INQR_DVSN": "02", "UNPR_DVSN": "01",
@@ -348,6 +360,18 @@ class BrokerConnector:
             holdings.append(Holding(code, row["prdt_name"], asset_type, corp_code, isin, quantity,
                                     avg, price, cost, value, pnl, pnl_pct, value / total if total else ZERO))
         return Balance(cash, total, cash / total if total else ZERO, tuple(holdings))
+
+    async def get_orderable_cash(self, holding: Holding | None = None) -> Decimal:
+        domain, credentials, tr_id = (
+            (VIRTUAL, self.settings.virtual, "VTTC8908R") if self.settings.is_virtual
+            else (LIVE, self.settings.live, "TTTC8908R"))
+        payload, _ = await self._get(
+            domain, credentials, "/trading/inquire-psbl-order", tr_id,
+            {"CANO": credentials.account_no, "ACNT_PRDT_CD": credentials.product_code,
+             "PDNO": holding.stock_code if holding else "",
+             "ORD_UNPR": format(holding.current_price, "f") if holding else "0",
+             "ORD_DVSN": "00", "CMA_EVLU_AMT_ICLD_YN": "N", "OVRS_ICLD_YN": "N"})
+        return number(payload["output"]["ord_psbl_cash"])
 
     async def _market(self, endpoint, transaction, code, params=None):
         code_params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code}
