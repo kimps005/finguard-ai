@@ -45,11 +45,43 @@ export interface Diagnosis extends Portfolio {
   final_report: string;
 }
 
+interface PriceLevel {
+  price: DecimalString;
+  reason: string;
+}
+
+interface BandIdentity {
+  stock_code: string;
+  name: string;
+  current_price: DecimalString;
+  average_price: DecimalString;
+}
+
+export type PriceBand = BandIdentity & ({ levels: null } | {
+  levels: {
+    buy: PriceLevel & { current_pct: DecimalString };
+    sell: PriceLevel & { current_pct: DecimalString; average_pct: DecimalString | null };
+    ceiling: PriceLevel;
+  };
+  position_pct: DecimalString;
+  indicative: boolean;
+  ma20: DecimalString | null;
+  recent_range: { sessions: number; low: DecimalString; high: DecimalString } | null;
+  flow: { foreign: DecimalString; institution: DecimalString } | null;
+  disclosures: { alias: string; title: string; receipt: string }[];
+});
+
+export interface PriceBands {
+  as_of: string;
+  bands: PriceBand[];
+}
+
 type ChatEvent =
   | { event: "status"; data: Status }
   | { event: "token"; data: { text: string } }
+  | { event: "price_bands"; data: PriceBands }
   | { event: "error"; data: { message: string } }
-  | { event: "done"; data: Diagnosis | { ok: false } };
+  | { event: "done"; data: Diagnosis | (PriceBands & { ok: true; mode: "price_bands" }) | { ok: false } };
 
 export async function* readChatEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<ChatEvent> {
   const reader = body.getReader();
@@ -70,7 +102,7 @@ export async function* readChatEvents(body: ReadableStream<Uint8Array>): AsyncGe
         const line = pending.slice(start, end);
         start = end + ending[0].length;
         if (line === "") {
-          if (lines.length && ["status", "token", "error", "done"].includes(event)) {
+          if (lines.length && ["status", "token", "price_bands", "error", "done"].includes(event)) {
             yield { event, data: JSON.parse(lines.join("\n")) } as ChatEvent;
           }
           event = "";

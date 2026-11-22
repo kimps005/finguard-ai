@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import {
   Activity, ArrowRight, ArrowUpRight, Check, CircleAlert, FileText,
   Globe2, Layers3, LoaderCircle, LockKeyhole, Send, ShieldCheck, Wallet,
@@ -8,6 +8,7 @@ import {
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { readChatEvents, type AccountSnapshot, type DecimalString, type Scorecards, type Status } from "../lib/chat-stream";
+import PriceOutlook, { PRICE_OUTLOOK_KEY } from "./price-outlook";
 
 const PIN_KEY = "finguard-app-pin";
 const PIN_HEADER = "X-App-Pin";
@@ -139,6 +140,7 @@ export default function Dashboard() {
   const [query, setQuery] = useState("");
   const [topic, setTopic] = useState("");
   const [running, setRunning] = useState(false);
+  const [automaticRunning, setAutomaticRunning] = useState(false);
   const [elapsed, setElapsed] = useState<number | null>(null);
   const [statuses, setStatuses] = useState<Record<string, Status>>({});
   const [report, setReport] = useState("");
@@ -157,10 +159,11 @@ export default function Dashboard() {
     };
   }, []);
 
-  function lock(message = "") {
+  const lock = useCallback((message = "") => {
     requestRef.current?.abort();
     requestRef.current = null;
     sessionStorage.removeItem(PIN_KEY);
+    sessionStorage.removeItem(PRICE_OUTLOOK_KEY);
     setPin("");
     setPinInput("");
     setAccount(null);
@@ -175,8 +178,9 @@ export default function Dashboard() {
     setAccessError(message);
     setChecking(false);
     setRunning(false);
+    setAutomaticRunning(false);
     setElapsed(null);
-  }
+  }, []);
 
   async function unlock(candidate: string, signal: AbortSignal) {
     setChecking(true);
@@ -219,7 +223,7 @@ export default function Dashboard() {
 
   async function analyze(value: string, label = questionTopic(value, account?.holdings ?? [])) {
     const question = value.trim();
-    if (!pin || !question || requestRef.current) return;
+    if (!pin || !question || automaticRunning || requestRef.current) return;
     const controller = new AbortController();
     const startedAt = performance.now();
     requestRef.current = controller;
@@ -258,9 +262,9 @@ export default function Dashboard() {
           setReport((current) => current + item.data.text);
         } else if (item.event === "error") {
           throw new Error(item.data.message);
-        } else {
+        } else if (item.event === "done") {
           const result = item.data;
-          if (!result.ok) throw new Error("계좌 분석을 완료할 수 없습니다.");
+          if (!result.ok || !("final_report" in result)) throw new Error("계좌 분석을 완료할 수 없습니다.");
           setReport(result.final_report);
           setWarnings(result.guardrail_warnings);
           setAccount((current) => ({
@@ -294,6 +298,7 @@ export default function Dashboard() {
     ? holdingReturn(accountReturn as DecimalString)
     : null;
   const holdingOptions = account?.holdings ?? [];
+  const questionDisabled = running || automaticRunning;
   const simulationHolding = holdingOptions.find((holding) => holding.stock_code === simulationCode)
     ?? holdingOptions.find((holding) => holding.profit_loss_pct.startsWith("-"))
     ?? holdingOptions[0];
@@ -329,6 +334,8 @@ export default function Dashboard() {
           <div className="page-heading">
             <h1>내 포트폴리오</h1>
           </div>
+          <PriceOutlook pin={pin} pinHeader={PIN_HEADER} manualRunning={running}
+            onBusyChange={setAutomaticRunning} onUnauthorized={lock} />
           <div className="dashboard-grid">
             <aside className="min-w-0 space-y-5" aria-label="계좌와 보유 종목">
               <section className="panel account-panel" aria-labelledby="account-title">
@@ -388,17 +395,29 @@ export default function Dashboard() {
             </aside>
             <div className="min-w-0 space-y-5">
               <section className="panel analysis-panel" aria-labelledby="diagnosis-title">
-                <div className="section-heading"><h2 id="diagnosis-title"><Activity size={19} /> 빠른 진단</h2></div>
-                <div className="quick-actions">
-                  <button type="button" disabled={running}
+                <div className="section-heading"><h2 id="diagnosis-title"><Activity size={19} /> 직접 질문하기</h2></div>
+                <form className="query-form" onSubmit={(event) => {
+                  event.preventDefault();
+                  if (questionDisabled || !query.trim()) return;
+                  void analyze(query);
+                  setQuery("");
+                }}>
+                  <label className="sr-only" htmlFor="query">계좌 진단 질문</label>
+                  <input id="query" maxLength={4000} placeholder="예: 내 계좌의 현재 잔고와 수익률은?" value={query}
+                    onChange={(event) => setQuery(event.target.value)} />
+                  <button className="primary-button" aria-label="질문 보내기" disabled={questionDisabled || !query.trim()}><Send size={17} /></button>
+                </form>
+                <h3 id="quick-actions-title" className="mt-5 text-sm font-semibold">빠른 진단</h3>
+                <div className="quick-actions" role="group" aria-labelledby="quick-actions-title">
+                  <button type="button" disabled={questionDisabled}
                     onClick={() => void analyze("내 계좌의 종합 리스크를 스캔해 줘. 보유 비중 상위 종목의 공시, 오버행, 수급을 함께 진단해 줘.", "종합 리스크 스캔")}>
                     <ShieldCheck size={18} /> 종합 리스크 스캔 <ArrowUpRight className="action-arrow" size={14} />
                   </button>
-                  <button type="button" disabled={running || !simulationHolding}
+                  <button type="button" disabled={questionDisabled || !simulationHolding}
                     onClick={() => simulationHolding && void analyze(`${simulationHolding.stock_code} 종목을 주문 가능 현금의 40%로 추가매수하면 예상 평단가와 비중이 어떻게 바뀌는지 물타기 시뮬레이션해 줘.`, `${simulationHolding.name} · 추가매수 시뮬레이션`)}>
                     <Wallet size={18} /> 추가매수 시뮬레이션 <ArrowUpRight className="action-arrow" size={14} />
                   </button>
-                  <button type="button" disabled={running}
+                  <button type="button" disabled={questionDisabled}
                     onClick={() => void analyze("최근 원/달러 환율과 금리 변화가 내 포트폴리오에 어떤 영향을 주는지 매크로 진단해 줘.", "환율·금리 영향")}>
                     <Globe2 size={18} /> 매크로 환율 진단 <ArrowUpRight className="action-arrow" size={14} />
                   </button>
@@ -406,24 +425,13 @@ export default function Dashboard() {
                 {simulationHolding && (
                   <div className="simulation-options">
                     <label htmlFor="simulation-stock">추가매수 대상</label>
-                    <select id="simulation-stock" value={simulationHolding.stock_code} disabled={running}
+                    <select id="simulation-stock" value={simulationHolding.stock_code} disabled={questionDisabled}
                       onChange={(event) => setSimulationCode(event.target.value)}>
                       {holdingOptions.map((holding) => <option key={holding.stock_code} value={holding.stock_code}>{holding.name}</option>)}
                     </select>
                     <span>주문 가능 현금의 40%</span>
                   </div>
                 )}
-                <form className="query-form" onSubmit={(event) => {
-                  event.preventDefault();
-                  if (running || !query.trim()) return;
-                  void analyze(query);
-                  setQuery("");
-                }}>
-                  <label className="sr-only" htmlFor="query">계좌 진단 질문</label>
-                  <input id="query" maxLength={4000} placeholder="예: 내 계좌의 현재 잔고와 수익률은?" value={query}
-                    onChange={(event) => setQuery(event.target.value)} />
-                  <button className="primary-button" aria-label="질문 보내기" disabled={running || !query.trim()}><Send size={17} /></button>
-                </form>
                 {(running || elapsed !== null) && (
                   <AnalysisProgress statuses={Object.values(statuses)} holdings={holdingOptions} elapsed={elapsed} />
                 )}

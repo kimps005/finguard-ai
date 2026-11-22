@@ -75,6 +75,37 @@ h1 { font-size: clamp(26px, 4vw, 36px); font-weight: 780; letter-spacing: -.06em
 .holding-metrics dd { color: var(--body); font-weight: 650; font-size: 12px; overflow-wrap: anywhere; }
 .empty-holdings { padding: 0 24px 24px; font-size: 14px; }
 
+.price-outlook { margin-bottom: 24px; }
+.outlook-heading, .outlook-meta { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+.outlook-heading h2 { font-size: clamp(19px, 3vw, 25px); font-weight: 780; }
+.outlook-refresh { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; border-radius: 12px; padding: 8px 14px; background: var(--blue-tint); color: #1b64c9; font-size: 14px; font-weight: 750; }
+.outlook-refresh:hover:not(:disabled) { background: #d9ebff; }
+.outlook-progress { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 13px 16px; border-radius: 14px; background: var(--blue-tint); color: #1b64c9; font-size: 14px; font-weight: 700; }
+.outlook-meta { margin-top: 12px; font-size: 14px; }
+.outlook-meta select { max-width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px; background: white; font-weight: 700; }
+.outlook-meta time, .outlook-note { color: var(--body); font-size: 13px; }
+.outlook-note { margin-top: 10px; }
+.outlook-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+.outlook-card { --accent: var(--blue); --tint: var(--blue-tint); --label: #1b64c9; padding: clamp(14px, 2.2vw, 24px); border-top: 3px solid var(--accent); overflow-wrap: anywhere; }
+.outlook-card[data-level="sell"] { --accent: var(--red); --tint: var(--red-tint); --label: #bd2435; }
+.outlook-card[data-level="ceiling"] { --accent: #f59e0b; --tint: var(--red-tint); --label: #a13624; }
+.outlook-card-label { display: inline-block; padding: 3px 8px; border-radius: 7px; color: var(--label); background: var(--tint); font-size: 12px; font-weight: 750; }
+.outlook-card h3 { margin-top: 9px; font-size: clamp(15px, 2.3vw, 20px); font-weight: 780; }
+.outlook-price { margin-top: 6px; font-size: clamp(25px, 3.4vw, 43px); line-height: 1.2; font-weight: 800; letter-spacing: -.05em; }
+.outlook-price span { margin-left: 3px; font-size: .52em; font-weight: 700; }
+.outlook-returns { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; color: var(--label); font-size: 13px; font-weight: 700; }
+.outlook-reason { margin-top: 9px; color: var(--body); font-size: 14px; line-height: 1.55; }
+.outlook-gauge, .outlook-evidence { margin-top: 10px; padding: 14px 20px; color: var(--body); font-size: 13px; }
+.outlook-gauge > p { text-align: center; }
+.outlook-gauge strong { color: var(--ink); }
+.outlook-track { position: relative; height: 6px; margin: 13px 7px 10px; border-radius: 6px; background: linear-gradient(90deg, #3182f6, #dfe6f3 50%, #f04452); }
+.outlook-marker { position: absolute; top: 50%; width: 15px; height: 15px; transform: translate(-50%, -50%); border-radius: 50%; border: 2px solid white; background: var(--ink); box-shadow: 0 0 0 1px var(--ink); }
+.outlook-endpoints { display: flex; justify-content: space-between; gap: 10px; }
+.outlook-endpoints span:last-child { text-align: right; }
+.outlook-evidence summary { width: fit-content; cursor: pointer; color: var(--ink); font-weight: 750; }
+.outlook-evidence ul { display: grid; gap: 4px; margin-top: 9px; padding-left: 17px; list-style: disc; }
+.outlook-evidence a { margin-left: 7px; color: #1b64c9; text-decoration: underline; overflow-wrap: anywhere; }
+
 .analysis-panel { padding: 24px; }
 .quick-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 16px; }
 .quick-actions button {
@@ -182,6 +213,7 @@ input::placeholder { color: var(--body); }
   .shell { width: calc(100% - 32px); }
   .dashboard { padding-top: 26px; }
   .dashboard-grid { grid-template-columns: minmax(0, 1fr); }
+  .outlook-cards { grid-template-columns: minmax(0, 1fr); gap: 8px; }
 }
 @media (max-width: 460px) {
   .analysis-panel, .account-panel { padding: 20px; }

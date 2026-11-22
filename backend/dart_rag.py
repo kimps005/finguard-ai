@@ -83,6 +83,8 @@ HYBRID_SQL = """
 WITH issuer AS MATERIALIZED (
     SELECT rcept_no, chunk_no, report_nm, rcept_dt, chunk_text, embedding
     FROM dart_chunks WHERE corp_code = %(corp)s
+      AND rcept_dt >= COALESCE(%(since)s::date, '-infinity'::date)
+      AND rcept_dt <= COALESCE(%(until)s::date, 'infinity'::date)
 ), terms AS (
     SELECT websearch_to_tsquery('simple', %(terms)s) AS query
 ), lexical AS (
@@ -98,13 +100,15 @@ LIMIT %(candidates)s
 """
 
 
-async def search(corp_code: str, query: str, *, limit: int = 5, candidates: int = 32) -> list[dict]:
+async def search(corp_code: str, query: str, *, limit: int = 5, candidates: int = 32,
+                 since=None, until=None) -> list[dict]:
     if not query.strip() or not 1 <= limit <= candidates:
         raise ValueError("search requires a query and 1 <= limit <= candidates")
     tokens = await keywords(query)
     vector, = await embed([query])
     params = {"corp": corp_code, "terms": " OR ".join(dict.fromkeys(tokens)),
-              "vector": json.dumps(vector, allow_nan=False), "candidates": candidates}
+              "vector": json.dumps(vector, allow_nan=False), "candidates": candidates,
+              "since": since, "until": until}
     async with await psycopg.AsyncConnection.connect(row_factory=dict_row) as conn:
         # Prefer the issuer B-tree even before a newly ingested volume has statistics.
         await conn.execute("SET LOCAL enable_seqscan = off")

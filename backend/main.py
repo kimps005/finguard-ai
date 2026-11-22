@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 import logging
 import os
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -12,6 +12,7 @@ from backend.connectors import ExternalConnectors
 from backend.dart_etl import DartETL
 from backend.portfolio_graph import account_view, build_graph
 from backend.portfolio_market import MarketData
+from backend.price_bands import price_band_updates
 from backend.stock_analysis import dump
 from backend.toss_broker import TossBrokerConnector, TossSettings
 
@@ -78,6 +79,11 @@ class ChatRequest(BaseModel):
     user_query: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
 
 
+class PriceBandRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mode: Literal["price_bands"]
+
+
 def sse(event, data):
     return f"event: {event}\ndata: {dump(data)}\n\n"
 
@@ -110,8 +116,25 @@ async def chat_events(graph, query):
         yield sse("done", {"ok": False})
 
 
+async def price_band_events(market):
+    yield sse("status", {"node": "market_data_node", "phase": "started"})
+    try:
+        preliminary = True
+        async for snapshot in price_band_updates(market):
+            if preliminary:
+                yield sse("price_bands", snapshot)
+                preliminary = False
+            else:
+                yield sse("done", {"ok": True, "mode": "price_bands", **snapshot})
+    except Exception as exc:
+        logger.error("Short-term analysis stream failed (%s)", type(exc).__name__)
+        yield sse("error", {"message": "1개월 타점 분석을 완료할 수 없습니다."})
+        yield sse("done", {"ok": False})
+
+
 @app.post("/api/v1/chat/stream", response_class=StreamingResponse)
-async def chat_stream(body: ChatRequest, request: Request):
-    return StreamingResponse(chat_events(request.app.state.graph, body.user_query),
-                             media_type="text/event-stream",
+async def chat_stream(body: ChatRequest | PriceBandRequest, request: Request):
+    events = (price_band_events(request.app.state.market) if isinstance(body, PriceBandRequest)
+              else chat_events(request.app.state.graph, body.user_query))
+    return StreamingResponse(events, media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
