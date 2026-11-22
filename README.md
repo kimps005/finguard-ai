@@ -58,6 +58,8 @@ POSTGRES_PASSWORD와 APP_ACCESS_PIN을 지정합니다. 종목 마스터 동기�
 
 토스증권 연결은 국내 원화 보유 종목과 원화 매수 가능 금액을 조회합니다. API에서 전체 예수금을 제공하지 않아 요약에는 국내 주식 평가액을 표시하며, 전체 계좌 기준 현금 비중과 시뮬레이션 예상 비중은 표시할 수 없습니다. 시장 데이터는 KIS 실전 키가 구성되면 기존 KIS 조회를 사용하고, 실패하거나 키가 없으면 PyKRX로 조회합니다. 한국투자증권 계좌를 연결하려면 `BROKER_PROVIDER=kis`와 해당 계좌의 KIS 설정을 지정합니다. KIS 계좌의 실전·모의 모드는 `IS_VIRTUAL`로 선택합니다.
 
+종목 심층 분석에는 `GEMINI_API_KEY`를 입력합니다. `GEMINI_MODEL`의 기본값은 `gemini-3.8-flash`입니다. 공시 검색의 임베딩과 리랭킹은 백엔드의 CUDA GPU에서 실행됩니다.
+
 브라우저에서 [http://127.0.0.1:3000](http://127.0.0.1:3000)을 열고 PIN을 입력합니다. 초기 PostgreSQL 볼륨에는 두 마이그레이션이 적용됩니다. 백엔드 시작 시 Module 4 마이그레이션을 재적용하고, 키가 구성된 경우 종목 마스터를 동기화한 뒤 Uvicorn을 시작합니다. GPU 모델 파일은 data/huggingface에 캐시됩니다.
 
 ### 로컬 개발 (Windows PowerShell)

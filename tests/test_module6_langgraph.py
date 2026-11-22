@@ -72,6 +72,31 @@ def parse_frame(frame):
     return event.removeprefix("event: "), json.loads(data.removeprefix("data: "))
 
 
+def test_stock_analysis_uses_gemini_with_structured_output(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("GEMINI_MODEL", "models/gemini-test")
+    answer = {"analysis_text": "[DOC-1] 예시 공시입니다.", "citations": ["DOC-1"]}
+
+    def respond(request):
+        assert request.url == "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent"
+        assert request.headers["x-goog-api-key"] == "test-key"
+        body = json.loads(request.content)
+        assert "[DOC-N]" in body["systemInstruction"]["parts"][0]["text"]
+        assert body["contents"] == [{"role": "user", "parts": [{"text": "가상 공시"}]}]
+        assert body["generationConfig"]["responseMimeType"] == "application/json"
+        assert body["generationConfig"]["responseJsonSchema"]["required"] == ["analysis_text", "citations"]
+        return httpx.Response(200, json={"candidates": [{"content": {"parts": [
+            {"thought": True, "text": "internal notes"},
+            {"text": json.dumps(answer)},
+        ]}}]})
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+            assert await stock_analysis.analyze(http, "가상 공시") == answer
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("positions", [[], [position(asset="ETF")]])
 def test_account_snapshot_uses_only_balance_and_orderable_cash(monkeypatch, positions):
     market = setup_market(monkeypatch, positions)
