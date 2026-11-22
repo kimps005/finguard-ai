@@ -11,14 +11,15 @@ import { readChatEvents, type AccountSnapshot, type DecimalString, type Scorecar
 
 const PIN_KEY = "finguard-app-pin";
 const PIN_HEADER = "X-App-Pin";
-const stages = [
-  { nodes: ["router_node"], name: "Router", detail: "질문 분류" },
-  { nodes: ["fast_quote_node", "market_data_node"], name: "Fast Quote / Market ETL", detail: "잔고·시장 데이터" },
-  { nodes: ["quant_scorecard_node"], name: "Quant Scorecard", detail: "정량 점수 산출" },
-  { nodes: ["stock_worker"], name: "Top-N Stock Workers", detail: "보유 종목 병렬 분석" },
-  { nodes: ["guardrail_node"], name: "Guardrail", detail: "근거 및 인용 검증" },
-  { nodes: ["synthesizer_node"], name: "Synthesizer", detail: "리포트 작성" },
-];
+const stageNames: Record<string, string> = {
+  router_node: "질문 의도와 분석 전략 설정",
+  fast_quote_node: "계좌 잔고와 실시간 시세 조회",
+  market_data_node: "실시간 시세·20일선·수급 데이터 수집",
+  quant_scorecard_node: "보유 종목 리스크 점수 계산",
+  stock_worker: "보유 종목 DART 공시·재무 리스크 분석",
+  guardrail_node: "공시 인용 및 수치 교차 검증",
+  synthesizer_node: "맞춤 대응 리포트 작성",
+};
 
 const won = new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 2 });
 const percent = new Intl.NumberFormat("ko-KR", { style: "percent", maximumFractionDigits: 2 });
@@ -27,39 +28,104 @@ function holdingReturn(value: DecimalString) {
   const negative = value.startsWith("-");
   const nonzero = /[1-9]/.test(value);
   return {
-    color: nonzero ? (negative ? "text-sky-700" : "text-rose-700") : "text-slate-600",
-    text: `${nonzero && !negative ? "+" : ""}${won.format(value)}%`,
+    direction: nonzero ? (negative ? "loss" : "gain") : "flat",
+    text: nonzero ? `${negative ? "" : "+"}${won.format(value)}%` : "0%",
   };
 }
 
-function Timeline({ statuses, complete }: { statuses: Status[]; complete: boolean }) {
+function displayField(payload: object, keys: string[]) {
+  const fields = payload as Record<string, unknown>;
+  return keys.map((key) => fields[key]).find((value): value is string =>
+    typeof value === "string" && value.trim().length > 0)?.trim();
+}
+
+function describeTask(status: Status, holdings: AccountSnapshot["holdings"]) {
+  const code = displayField(status, ["stock_code", "ticker"])
+    ?? status.task_id?.match(/(?:^|\D)(\d{6})(?!\d)/)?.[1];
+  const holding = holdings.find((item) => item.stock_code === code || item.name === status.task_id);
+  const name = displayField(status, ["stock_name", "name"]) ?? holding?.name;
+  const ticker = code ?? holding?.stock_code;
+  const subject = name && ticker ? `${name}(${ticker})` : name ?? ticker;
+  const detail = displayField(status, ["task_name", "detail", "message"]);
+  if (subject) return `${subject} ${detail ?? (status.node === "stock_worker" ? "공시·수급 분석" : stageNames[status.node] ?? "분석")}`;
+  return detail ?? stageNames[status.node] ?? "계좌 데이터 분석";
+}
+
+function questionTopic(question: string, holdings: AccountSnapshot["holdings"]) {
+  const subject = holdings.find((holding) => question.includes(holding.name) || question.includes(holding.stock_code))?.name;
+  const topics = [
+    [/잔고|수익률|평가액|손익|계좌 조회/u, "잔고·수익률"],
+    [/공시|오버행|재무|희석/u, "공시·재무 리스크"],
+    [/수급|시세|20일선/u, "시세·수급"],
+    [/환율|금리|매크로/u, "환율·금리"],
+    [/물타기|시뮬레이션|추가\s*매수/u, "추가매수 시뮬레이션"],
+    [/비중|리밸런싱/u, "포트폴리오 비중"],
+    [/전략|대응|매도/u, "대응 전략"],
+  ] as const;
+  const keywords = topics.filter(([pattern]) => pattern.test(question)).slice(0, 2).map(([, label]) => label);
+  return [subject, ...keywords].filter(Boolean).join(" · ") || "포트폴리오 진단";
+}
+
+function AnalysisProgress({ statuses, holdings, elapsed }: {
+  statuses: Status[];
+  holdings: AccountSnapshot["holdings"];
+  elapsed: number | null;
+}) {
+  if (elapsed !== null) {
+    const seconds = Math.max(1, Math.round(elapsed / 1000));
+    const duration = seconds < 60 ? `${seconds}초` : `${Math.floor(seconds / 60)}분 ${seconds % 60}초`;
+    return (
+      <div className="progress-complete" role="status">
+        <span className="completion-icon"><Check size={17} aria-hidden="true" /></span>
+        <span>분석 완료</span>
+        <span className="duration">{duration}</span>
+      </div>
+    );
+  }
+
+  const active = statuses.filter((status) => status.phase === "started").reverse();
+  const current = active[0] ?? statuses[statuses.length - 1];
+  const related = [...new Set(active.slice(1).map((status) => describeTask(status, holdings)))];
+  const currentTitle = current ? describeTask(current, holdings) : stageNames.router_node;
+  const title = active.length || !current ? `${currentTitle} 중` : `${currentTitle} ${current.phase === "failed" ? "실패" : "완료"}`;
   return (
-    <ol className="timeline">
-      {stages.map((stage) => {
-        const tasks = statuses.filter((status) => stage.nodes.includes(status.node));
-        const active = tasks.some((task) => task.phase === "started");
-        const failed = tasks.some((task) => task.phase === "failed");
-        const done = tasks.filter((task) => task.phase === "completed").length;
-        const phase = failed ? "failed" : active ? "active" : done ? "done" : "waiting";
-        const detail = tasks[0]?.node === "fast_quote_node" ? "경량 잔고 조회"
-          : tasks[0]?.node === "market_data_node" ? "시장 데이터 수집"
-          : tasks.length > 1 ? `${tasks.length}개 중 ${done}개 완료` : stage.detail;
-        const label = { failed: "실패", active: "진행 중", done: "완료", waiting: complete ? "건너뜀" : "대기" }[phase];
-        return (
-          <li key={stage.name} className="timeline-step" data-phase={phase}>
-            <span className="step-icon" aria-hidden="true">
-              {phase === "done" && <Check size={13} />}
-              {phase === "active" && <LoaderCircle size={13} className="animate-spin motion-reduce:animate-none" />}
-              {phase === "failed" && <CircleAlert size={13} />}
-            </span>
-            <span className="step-name">{stage.name}</span>
-            <span className="step-detail">{phase === "waiting" && complete ? "건너뜀" : detail}</span>
-            <span className="sr-only">{label}</span>
-          </li>
-        );
-      })}
-    </ol>
+    <div className="live-progress">
+      <div className="live-stage">
+        <span className="radar" aria-hidden="true"><span className="animate-ping motion-reduce:animate-none" /></span>
+        <div className="min-w-0" role="status">
+          <p className="live-label">실시간 분석</p>
+          <p className="live-title">{title}</p>
+          {related.some((detail) => detail !== currentTitle) && (
+            <ul className="live-tasks">
+              {related.filter((detail) => detail !== currentTitle).map((detail) => <li key={detail}>{detail} 중</li>)}
+            </ul>
+          )}
+        </div>
+      </div>
+      <div className="progress-track" aria-hidden="true" />
+    </div>
   );
+}
+
+function ReportBody({ report }: { report: string }) {
+  const evidenceHeading = /^(?:#{1,6}[ \t]+|\*\*)(?:\d+[.)][ \t]*)?(?:판단 근거|핵심 근거|근거 공시|공시 근거|근거|출처|인용 공시)(?:[ \t]*\*\*)?[ \t]*[:：]?[ \t]*#*[ \t]*$/mu;
+  const evidence = evidenceHeading.exec(report);
+  const answer = (evidence ? report.slice(0, evidence.index) : report)
+    .replace(/^(?:\s*#{1,6}[ \t]+|\s*\*\*)핵심 답변(?:\*\*)?[ \t]*[:：]?[ \t]*#*[ \t]*\r?\n/u, "")
+    .trim();
+  const sources = evidence ? report.slice(evidence.index + evidence[0].length).trim() : "";
+  const sections = [{ title: "핵심 답변", content: answer }, { title: "판단 근거", content: sources }];
+  return sections.filter(({ content }) => content).map(({ title, content }) => (
+    <div className="report-section" key={title}>
+      <h3>{title}</h3>
+      <div className="markdown">
+        <Markdown remarkPlugins={[remarkGfm]} disallowedElements={["img"]}
+          components={{ table: ({ children }) => <div className="table-scroll"><table>{children}</table></div> }}>
+          {content}
+        </Markdown>
+      </div>
+    </div>
+  ));
 }
 
 export default function Dashboard() {
@@ -71,9 +137,9 @@ export default function Dashboard() {
   const [scores, setScores] = useState<Scorecards>({});
   const [simulationCode, setSimulationCode] = useState("");
   const [query, setQuery] = useState("");
-  const [lastQuery, setLastQuery] = useState("");
+  const [topic, setTopic] = useState("");
   const [running, setRunning] = useState(false);
-  const [complete, setComplete] = useState(false);
+  const [elapsed, setElapsed] = useState<number | null>(null);
   const [statuses, setStatuses] = useState<Record<string, Status>>({});
   const [report, setReport] = useState("");
   const [warnings, setWarnings] = useState<string[]>([]);
@@ -101,7 +167,7 @@ export default function Dashboard() {
     setScores({});
     setSimulationCode("");
     setQuery("");
-    setLastQuery("");
+    setTopic("");
     setReport("");
     setStatuses({});
     setWarnings([]);
@@ -109,7 +175,7 @@ export default function Dashboard() {
     setAccessError(message);
     setChecking(false);
     setRunning(false);
-    setComplete(false);
+    setElapsed(null);
   }
 
   async function unlock(candidate: string, signal: AbortSignal) {
@@ -151,14 +217,15 @@ export default function Dashboard() {
     });
   }
 
-  async function analyze(value: string) {
+  async function analyze(value: string, label = questionTopic(value, account?.holdings ?? [])) {
     const question = value.trim();
     if (!pin || !question || requestRef.current) return;
     const controller = new AbortController();
+    const startedAt = performance.now();
     requestRef.current = controller;
-    setLastQuery(question);
+    setTopic(label);
     setRunning(true);
-    setComplete(false);
+    setElapsed(null);
     setReport("");
     setStatuses({});
     setWarnings([]);
@@ -181,7 +248,12 @@ export default function Dashboard() {
         if (item.event === "status") {
           const status = item.data;
           const key = status.node === "router_node" ? status.node : status.task_id ?? status.node;
-          setStatuses((current) => ({ ...current, [key]: status }));
+          setStatuses((current) => {
+            // Keep event order and retain target metadata when a later phase omits it.
+            const next = { ...current };
+            delete next[key];
+            return { ...next, [key]: { ...current[key], ...status } };
+          });
         } else if (item.event === "token") {
           setReport((current) => current + item.data.text);
         } else if (item.event === "error") {
@@ -199,7 +271,7 @@ export default function Dashboard() {
             },
           }));
           if (result.intent_type !== "fast_lookup") setScores(result.quant_scorecards);
-          setComplete(true);
+          setElapsed(performance.now() - startedAt);
           return;
         }
       }
@@ -217,6 +289,10 @@ export default function Dashboard() {
   }
 
   const summary = account?.account_summary;
+  const accountReturn = summary && displayField(summary, ["profit_loss_pct", "total_profit_loss_pct", "return_pct"]);
+  const accountChange = accountReturn && /^[+-]?\d+(?:\.\d+)?$/u.test(accountReturn)
+    ? holdingReturn(accountReturn as DecimalString)
+    : null;
   const holdingOptions = account?.holdings ?? [];
   const simulationHolding = holdingOptions.find((holding) => holding.stock_code === simulationCode)
     ?? holdingOptions.find((holding) => holding.profit_loss_pct.startsWith("-"))
@@ -251,8 +327,7 @@ export default function Dashboard() {
       ) : (
         <main className="shell dashboard">
           <div className="page-heading">
-            <h1>포트폴리오 대시보드</h1>
-            <p>국내 주식 계좌와 보유 종목의 리스크를 확인하세요.</p>
+            <h1>내 포트폴리오</h1>
           </div>
           <div className="dashboard-grid">
             <aside className="min-w-0 space-y-5" aria-label="계좌와 보유 종목">
@@ -263,14 +338,19 @@ export default function Dashboard() {
                     <dt>{summary.cash_deposit === null ? "국내 주식 평가액" : "총 평가액"}</dt>
                     <dd>{won.format(summary.total_value)}<small>원</small></dd>
                   </div>
-                  <div className="account-cash">
-                    <div>
-                      <dt>원화 매수 가능 금액</dt>
-                      <dd>{summary.orderable_cash === null ? "조회 불가" : `${won.format(summary.orderable_cash)}원`}</dd>
-                      {summary.orderable_cash !== null && <span className="cash-reference">접속 시 조회</span>}
+                  {accountChange && <div className="account-return">
+                    <dt>평가손익률</dt><dd className="return-badge" data-direction={accountChange.direction}>{accountChange.text}</dd>
+                  </div>}
+                  {(summary.orderable_cash !== null || summary.cash_weight !== null) && (
+                    <div className="account-cash">
+                      {summary.orderable_cash !== null && (
+                        <div><dt>매수 가능 금액</dt><dd>{won.format(summary.orderable_cash)}원</dd></div>
+                      )}
+                      {summary.cash_weight !== null && (
+                        <div><dt>현금 비중</dt><dd>{percent.format(summary.cash_weight)}</dd></div>
+                      )}
                     </div>
-                    <div><dt>현금 비중</dt><dd>{summary.cash_weight === null ? "조회 불가" : percent.format(summary.cash_weight)}</dd></div>
-                  </div>
+                  )}
                 </dl>
               </section>
               <section className="panel holdings-panel" aria-labelledby="holdings-title">
@@ -283,9 +363,7 @@ export default function Dashboard() {
                     {holdingOptions.map((holding) => {
                       const change = holdingReturn(holding.profit_loss_pct);
                       const card = scores[holding.stock_code];
-                      const score = holding.asset_type !== "STOCK" ? "—"
-                        : card?.total != null ? `${card.total}/100`
-                        : card ? "자료 부족" : "진단 전";
+                      const score = holding.asset_type === "STOCK" ? card?.total : null;
                       return (
                         <li key={holding.stock_code} className="holding">
                           <div className="holding-heading">
@@ -293,12 +371,13 @@ export default function Dashboard() {
                               <h3>{holding.name}</h3>
                               <span className="ticker">{holding.stock_code}</span>
                             </div>
-                            <span className="asset-badge" data-asset={holding.asset_type}>{holding.asset_type ?? "미분류"}</span>
+                            <span className="return-badge" data-direction={change.direction} aria-label={`평가손익률 ${change.text}`}>
+                              {change.text}
+                            </span>
                           </div>
                           <dl className="holding-metrics">
                             <div><dt>평단가</dt><dd>{won.format(holding.average_price)}원</dd></div>
-                            <div><dt>평가손익률</dt><dd className={change.color}>{change.text}</dd></div>
-                            <div><dt>정량 점수</dt><dd>{score}</dd></div>
+                            {score != null && <div><dt>정량 점수</dt><dd>{score}/100</dd></div>}
                           </dl>
                         </li>
                       );
@@ -312,21 +391,21 @@ export default function Dashboard() {
                 <div className="section-heading"><h2 id="diagnosis-title"><Activity size={19} /> 빠른 진단</h2></div>
                 <div className="quick-actions">
                   <button type="button" disabled={running}
-                    onClick={() => void analyze("내 계좌의 종합 리스크를 스캔해 줘. 보유 비중 상위 종목의 공시, 오버행, 수급을 함께 진단해 줘.")}>
+                    onClick={() => void analyze("내 계좌의 종합 리스크를 스캔해 줘. 보유 비중 상위 종목의 공시, 오버행, 수급을 함께 진단해 줘.", "종합 리스크 스캔")}>
                     <ShieldCheck size={18} /> 종합 리스크 스캔 <ArrowUpRight className="action-arrow" size={14} />
                   </button>
                   <button type="button" disabled={running || !simulationHolding}
-                    onClick={() => simulationHolding && void analyze(`${simulationHolding.stock_code} 종목을 주문 가능 현금의 40%로 추가매수하면 예상 평단가와 비중이 어떻게 바뀌는지 물타기 시뮬레이션해 줘.`)}>
-                    <Wallet size={18} /> 예수금 물타기 시뮬레이션 <ArrowUpRight className="action-arrow" size={14} />
+                    onClick={() => simulationHolding && void analyze(`${simulationHolding.stock_code} 종목을 주문 가능 현금의 40%로 추가매수하면 예상 평단가와 비중이 어떻게 바뀌는지 물타기 시뮬레이션해 줘.`, `${simulationHolding.name} · 추가매수 시뮬레이션`)}>
+                    <Wallet size={18} /> 추가매수 시뮬레이션 <ArrowUpRight className="action-arrow" size={14} />
                   </button>
                   <button type="button" disabled={running}
-                    onClick={() => void analyze("최근 원/달러 환율과 금리 변화가 내 포트폴리오에 어떤 영향을 주는지 매크로 진단해 줘.")}>
+                    onClick={() => void analyze("최근 원/달러 환율과 금리 변화가 내 포트폴리오에 어떤 영향을 주는지 매크로 진단해 줘.", "환율·금리 영향")}>
                     <Globe2 size={18} /> 매크로 환율 진단 <ArrowUpRight className="action-arrow" size={14} />
                   </button>
                 </div>
                 {simulationHolding && (
                   <div className="simulation-options">
-                    <label htmlFor="simulation-stock">물타기 대상</label>
+                    <label htmlFor="simulation-stock">추가매수 대상</label>
                     <select id="simulation-stock" value={simulationHolding.stock_code} disabled={running}
                       onChange={(event) => setSimulationCode(event.target.value)}>
                       {holdingOptions.map((holding) => <option key={holding.stock_code} value={holding.stock_code}>{holding.name}</option>)}
@@ -345,37 +424,26 @@ export default function Dashboard() {
                     onChange={(event) => setQuery(event.target.value)} />
                   <button className="primary-button" aria-label="질문 보내기" disabled={running || !query.trim()}><Send size={17} /></button>
                 </form>
+                {(running || elapsed !== null) && (
+                  <AnalysisProgress statuses={Object.values(statuses)} holdings={holdingOptions} elapsed={elapsed} />
+                )}
               </section>
-              <section className="panel analysis-panel" aria-labelledby="timeline-title">
-                <div className="section-heading">
-                  <h2 id="timeline-title"><Activity size={19} /> 에이전트 타임라인</h2>
-                  <span className="run-badge" data-active={running} role="status">
-                    {running ? "분석 중" : complete ? "분석 완료" : analysisError ? "분석 중단" : "대기 중"}
-                  </span>
+              {topic && <section className="panel analysis-panel" aria-labelledby="report-title" aria-busy={running}>
+                <div className="section-heading report-heading">
+                  <h2 id="report-title"><FileText size={19} /> 진단 리포트</h2>
+                  <p className="report-topic" title={topic}>{topic}</p>
                 </div>
-                <Timeline statuses={Object.values(statuses)} complete={complete} />
-              </section>
-              <section className="panel analysis-panel" aria-labelledby="report-title" aria-busy={running}>
-                <div className="section-heading"><h2 id="report-title"><FileText size={19} /> 진단 리포트</h2></div>
+                {analysisError && <p className="error" role="alert">{analysisError}</p>}
+                {report && <ReportBody report={report} />}
                 {warnings.length > 0 && (
                   <div className="warning" role="alert">
                     <CircleAlert size={18} />
-                    <div><strong>진단 리포트 안내</strong>
+                    <div><strong>검증 참고사항</strong>
                       <ul>{warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>
                     </div>
                   </div>
                 )}
-                {lastQuery && <p className="report-query">{lastQuery}</p>}
-                {analysisError && <p className="error" role="alert">{analysisError}</p>}
-                {report ? (
-                  <div className="markdown">
-                    <Markdown remarkPlugins={[remarkGfm]} disallowedElements={["img"]}
-                      components={{ table: ({ children }) => <div className="table-scroll"><table>{children}</table></div> }}>
-                      {report}
-                    </Markdown>
-                  </div>
-                ) : !analysisError && <p className="report-empty muted">{running ? "리포트를 작성하고 있습니다." : "진단을 시작하면 이곳에 결과가 표시됩니다."}</p>}
-              </section>
+              </section>}
             </div>
           </div>
         </main>
