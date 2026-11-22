@@ -2,7 +2,9 @@ import asyncio
 from unittest.mock import AsyncMock, Mock
 
 from google.genai.errors import ServerError
+from httpx import Request
 from langchain_core.messages import AIMessage
+from langchain_openai.chat_models.base import OpenAITimeoutError
 from pydantic import BaseModel
 import pytest
 
@@ -12,6 +14,25 @@ from backend import llm
 class Analysis(BaseModel):
     analysis_text: str
     citations: list[str]
+
+
+def test_worker_switches_to_gemini_on_openai_timeout(monkeypatch):
+    monkeypatch.delenv("WORKER_MODEL", raising=False)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test")
+    primary = Mock()
+    request = AsyncMock(side_effect=OpenAITimeoutError(Request("POST", llm.BASE_URL)))
+    primary.return_value.with_structured_output.return_value.ainvoke = request
+    monkeypatch.setattr(llm, "ChatOpenAI", primary)
+    expected = Analysis(analysis_text="공시 위험 진단", citations=["DOC-1"])
+    fallback = AsyncMock(return_value=expected)
+    monkeypatch.setattr(llm, "invoke_gemini", fallback)
+
+    assert asyncio.run(llm.invoke("worker", "진단", "공시", Analysis)) == expected
+    assert primary.call_args.kwargs["model"] == "qwen3.8-flash"
+    assert primary.call_args.kwargs["timeout"] == 45.0
+    assert primary.call_args.kwargs["max_retries"] == 0
+    request.assert_awaited_once()
+    fallback.assert_awaited_once_with("worker", "gemini-3.5-flash-lite", request.await_args.args[0], Analysis)
 
 
 def test_synthesis_switches_model_once_on_capacity_error(monkeypatch, caplog):

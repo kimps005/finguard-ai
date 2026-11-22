@@ -8,8 +8,10 @@ import traceback
 from typing import Literal
 
 from google.genai.types import HarmBlockThreshold, HarmCategory
+from httpx import TimeoutException
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
+from openai import APITimeoutError
 from pydantic import ValidationError
 
 
@@ -134,12 +136,16 @@ async def invoke(role: Role, instruction: str, context: str, schema):
         if role != "synthesizer" and key:
             client = await asyncio.to_thread(
                 ChatOpenAI, api_key=key, base_url=os.getenv("DASHSCOPE_BASE_URL", "").strip() or BASE_URL,
-                model=model, temperature=0, timeout=15, max_retries=0)
+                model=model, temperature=0, timeout=45.0 if role == "worker" else 15, max_retries=0)
             try:
                 # DashScope supports OpenAI-compatible function calling.
                 answer = await client.with_structured_output(schema, method="function_calling").ainvoke(messages)
                 return schema.model_validate(answer)
             except Exception as exc:
+                if role == "worker" and isinstance(exc, (APITimeoutError, TimeoutException)):
+                    log_failure(role, model, exc)
+                    model = GEMINI_CAPACITY_FALLBACK
+                    return await invoke_gemini(role, model, messages, schema)
                 if not quota_error(exc):
                     raise
                 log_failure(role, model, exc)
