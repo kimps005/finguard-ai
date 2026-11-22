@@ -135,17 +135,26 @@ def test_failed_isin_lookup_uses_module4_reports(monkeypatch, failure):
     asyncio.run(run())
 
 
-def test_naver_news_sanitizes_normalizes_and_deduplicates():
+@pytest.mark.parametrize(("hub", "url", "id_header", "secret_header"), [
+    (False, "https://openapi.naver.com/v1/search/news.json", "X-Naver-Client-Id", "X-Naver-Client-Secret"),
+    (True, "https://naverapihub.apigw.ntruss.com/search/v1/news", "X-NCP-APIGW-API-KEY-ID", "X-NCP-APIGW-API-KEY"),
+])
+def test_naver_news_sanitizes_normalizes_and_deduplicates(monkeypatch, hub, url, id_header, secret_header):
+    monkeypatch.setenv("NAVER_CLIENT_ID", "id")
+    monkeypatch.setenv("NAVER_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("NAVER_API_HUB", str(hub).lower())
+
     def article(title, link, hour, *, original=""):
         return {"title": title, "link": link, "originallink": original,
                 "description": '<b>실적</b> &quot;발표&quot; &amp; 전망',
                 "pubDate": f"Fri, 20 Nov 2026 {hour}:00:00 +0000"}
 
     def respond(request):
+        assert str(request.url.copy_with(query=None)) == url
         assert request.url.params["query"] == "삼성전자"
         assert request.url.params["sort"] == "date"
-        assert request.headers["X-Naver-Client-Id"] == "id"
-        assert request.headers["X-Naver-Client-Secret"] == "secret"
+        assert request.headers[id_header] == "id"
+        assert request.headers[secret_header] == "secret"
         return httpx.Response(200, json={"items": [
             article("삼성전자 &amp; 반도체", "https://news.test/duplicate-title", "04"),
             article("<b>삼성전자</b> &amp; 반도체", "https://naver.test/1", "06",
@@ -157,7 +166,7 @@ def test_naver_news_sanitizes_normalizes_and_deduplicates():
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
-            api = connectors.ExternalConnectors(http, MemoryRedis(), naver_id="id", naver_secret="secret")
+            api = connectors.ExternalConnectors.from_env(http, MemoryRedis())
             news = await api.get_news(STOCK["corp_name"])
             assert [item["title"] for item in news] == ["삼성전자 & 반도체", "업계 동향"]
             assert news[0] == {"title": "삼성전자 & 반도체", "description": '실적 "발표" & 전망',

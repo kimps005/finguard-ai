@@ -25,6 +25,7 @@ from backend.lockup_disclosures import disclosed_releases
 
 FSC_URL = "https://apis.data.go.kr/1160100/GetStocIssuInfoService_V3/getLockUpRetuInfo_V3"
 NAVER_URL = "https://openapi.naver.com/v1/search/news.json"
+NAVER_HUB_URL = "https://naverapihub.apigw.ntruss.com/search/v1/news"
 ECOS_URL = "https://ecos.bok.or.kr/api/StatisticSearch"
 ECOS_TTL = 86_400
 ECOS_SERIES = {
@@ -45,12 +46,13 @@ class ConnectorError(Exception):
 
 class ExternalConnectors:
     def __init__(self, http: httpx.AsyncClient, redis, *, fsc_key="", naver_id="",
-                 naver_secret="", ecos_key="", clock=None, sleep=asyncio.sleep):
+                 naver_secret="", naver_api_hub=False, ecos_key="", clock=None, sleep=asyncio.sleep):
         self.http = http
         self.redis = redis
         self.fsc_key = fsc_key
         self.naver_id = naver_id
         self.naver_secret = naver_secret
+        self.naver_api_hub = naver_api_hub
         self.ecos_key = ecos_key
         self.clock = clock or (lambda: datetime.now(KST))
         self.sleep = sleep
@@ -61,6 +63,7 @@ class ExternalConnectors:
         return cls(http, redis, fsc_key=os.getenv("FSC_SERVICE_KEY", "").strip(),
                    naver_id=os.getenv("NAVER_CLIENT_ID", "").strip(),
                    naver_secret=os.getenv("NAVER_CLIENT_SECRET", "").strip(),
+                   naver_api_hub=os.getenv("NAVER_API_HUB", "").strip().lower() == "true",
                    ecos_key=os.getenv("ECOS_API_KEY", "").strip())
 
     async def _get_json(self, provider, url, **kwargs):
@@ -208,10 +211,16 @@ class ExternalConnectors:
     async def get_news(self, corp_name: str, *, limit: int = 10) -> list[dict]:
         if not self.naver_id or not self.naver_secret or not corp_name.strip():
             return []
+        if self.naver_api_hub:
+            url = NAVER_HUB_URL
+            headers = {"X-NCP-APIGW-API-KEY-ID": self.naver_id, "X-NCP-APIGW-API-KEY": self.naver_secret}
+        else:
+            url = NAVER_URL
+            headers = {"X-Naver-Client-Id": self.naver_id, "X-Naver-Client-Secret": self.naver_secret}
         try:
             payload = await self._get_json(
-                "Naver", NAVER_URL, params={"query": corp_name, "sort": "date", "display": limit},
-                headers={"X-Naver-Client-Id": self.naver_id, "X-Naver-Client-Secret": self.naver_secret},
+                "Naver", url, params={"query": corp_name, "sort": "date", "display": limit},
+                headers=headers,
             )
             items = payload["items"]
             if not isinstance(items, list):
