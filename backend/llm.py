@@ -1,6 +1,7 @@
 """Provider selection and failure isolation for the portfolio graph and evaluation."""
 
 import asyncio
+import json
 import logging
 import os
 import random
@@ -10,6 +11,7 @@ from typing import Literal
 
 from google.genai.types import HarmBlockThreshold, HarmCategory
 from httpx import TimeoutException
+from langchain_core.exceptions import OutputParserException
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 from openai import APITimeoutError
@@ -135,8 +137,13 @@ async def invoke_dashscope(model, key, messages, schema, *, timeout):
         ChatOpenAI, api_key=key, base_url=os.getenv("DASHSCOPE_BASE_URL", "").strip() or BASE_URL,
         model=model, temperature=0, timeout=timeout, max_retries=0,
     )
-    answer = await client.with_structured_output(schema, method="function_calling").ainvoke(messages)
-    return schema.model_validate(answer)
+    instruction = f"다음 스키마에 맞는 JSON 객체를 반환하라.\n{json.dumps(schema.model_json_schema(), ensure_ascii=False)}"
+    json_messages = [("system", f"{messages[0][1]}\n\n{instruction}"), *messages[1:]]
+    try:
+        answer = await client.with_structured_output(schema, method="json_mode").ainvoke(json_messages)
+        return schema.model_validate(answer)
+    except (OutputParserException, ValidationError) as exc:
+        raise LLMUnavailable("DashScope returned invalid structured output", reason="응답 형식 오류") from exc
 
 
 async def invoke(role: Role, instruction: str, context: str, schema):

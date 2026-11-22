@@ -1,5 +1,5 @@
 import asyncio
-from unittest.mock import AsyncMock, Mock, call
+from unittest.mock import AsyncMock, Mock, PropertyMock, call
 
 from google.genai.errors import ServerError
 from httpx import ReadTimeout, Request
@@ -40,8 +40,10 @@ def test_worker_retries_timeout_then_switches_to_router(monkeypatch, error_type)
     ]
     assert all(entry.kwargs["timeout"] == 45.0 for entry in client.call_args_list)
     assert all(entry.kwargs["max_retries"] == 0 for entry in client.call_args_list)
-    messages = [("system", "진단"), ("human", "공시")]
+    messages = request.await_args.args[0]
     assert request.await_args_list == [call(messages)] * 2
+    assert messages[0][1].startswith("진단\n\n") and "JSON" in messages[0][1]
+    assert messages[1] == ("human", "공시")
     fallback.assert_awaited_once_with(messages)
 
 
@@ -103,7 +105,33 @@ def test_synthesis_switches_to_dashscope_after_three_failed_retries(
     assert sleep.await_args_list == [call(1.5), call(3.0), call(6.0)]
     dashscope.assert_called_once()
     assert dashscope.call_args.kwargs["model"] == expected_model
-    request.assert_awaited_once_with(messages)
+    request.assert_awaited_once()
+    assert request.await_args.args[0][1:] == messages[1:]
+
+
+def test_dashscope_parses_json_content_without_a_tool_call(monkeypatch):
+    from openai.resources.chat.completions import AsyncCompletions
+    from openai.types.chat import ChatCompletion
+
+    completion = ChatCompletion.model_validate({
+        "id": "test", "created": 0, "model": "qwen3.7-plus", "object": "chat.completion",
+        "choices": [{
+            "index": 0, "finish_reason": "stop",
+            "message": {"role": "assistant", "content": '{"analysis_text":"공시 위험 진단","citations":["DOC-1"]}'},
+        }],
+    })
+    request = AsyncMock(return_value=Mock(parse=Mock(return_value=completion)))
+    monkeypatch.setattr(AsyncCompletions, "with_raw_response", PropertyMock(return_value=Mock(parse=request)))
+    messages = [("system", "진단"), ("human", "공시")]
+
+    result = asyncio.run(llm.invoke_dashscope("qwen3.7-plus", "test", messages, Analysis, timeout=60))
+
+    assert result == Analysis(analysis_text="공시 위험 진단", citations=["DOC-1"])
+    payload = request.await_args.kwargs
+    assert payload["response_format"] == {"type": "json_object"}
+    assert "tools" not in payload
+    assert "analysis_text" in payload["messages"][0]["content"]
+    assert payload["messages"][1] == {"role": "user", "content": "공시"}
 
 
 @pytest.mark.parametrize(("metadata", "reason"), [

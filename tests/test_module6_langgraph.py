@@ -119,11 +119,12 @@ def test_dashscope_quota_falls_back_once_to_gemini(monkeypatch, role, model, sta
     result = asyncio.run(llm.invoke(role, "분류", "공시", Intent))
     assert result.intent_type == "deep_diagnosis"
     assert dash.call_args.kwargs == dict(api_key="dash-key", model=model, base_url=llm.BASE_URL,
-                                         temperature=0, timeout=15, max_retries=0)
+                                         temperature=0, timeout=45 if role == "worker" else 15, max_retries=0)
     assert google.call_args.kwargs["model"] == "gemini-3.8-flash"
     assert google.call_args.kwargs["google_api_key"] == "gemini-key"
     primary.assert_awaited_once()
-    fallback.assert_awaited_once_with(*primary.await_args.args)
+    fallback.assert_awaited_once_with([("system", "분류"), ("human", "공시")])
+    assert primary.await_args.args[0][1] == ("human", "공시")
 
 
 @pytest.mark.parametrize("positions", [[], [position(asset="ETF")]])
@@ -231,11 +232,16 @@ def test_empty_fanout_reaches_synthesis(monkeypatch, positions):
     graph = build_graph(market)
     result = asyncio.run(graph.ainvoke({"user_query": "내 계좌의 리스크를 진단해 줘"}))
     assert route_to_stock_workers(result) == "synthesizer_node"
-    assert result["intent_type"] == "deep_diagnosis" and "총 평가액 400원" in result["final_report"]
+    assert result["intent_type"] == "deep_diagnosis"
+    assert result["account_summary"]["total_value"] == D(400)
+    assert stock_analysis.EVIDENCE_HEADING in result["final_report"]
     assert result["verified_stock_results"] == [] and result["stock_analysis_results"] == []
     if positions:
+        assert positions[0].name in result["final_report"]
         assert "five_day_flow" in result["quant_scorecards"]["000001"]
         assert "scores" not in result["quant_scorecards"]["000001"]
+    else:
+        assert "보유 종목이 없어" in result["final_report"]
     market.etl.ingest_stock.assert_not_called()
     market.external.get_lockup.assert_not_called()
     dart_rag.search.assert_not_called()
@@ -248,7 +254,9 @@ def test_top_three_worker_isolation_guardrail_and_repeated_requests(monkeypatch)
 
     synthesis = llm.ChatGoogleGenerativeAI.return_value.with_structured_output.return_value.ainvoke
     synthesis.return_value = gemini_result(stock_analysis.Analysis(
-        analysis_text="[DOC-1] 첫 근거입니다. [DOC-3] 다른 종목의 근거입니다.", citations=["DOC-1", "DOC-3"]))
+        analysis_text=f"{stock_analysis.ANSWER_HEADING}\n[DOC-1]과 [DOC-3]에 근거한 진단입니다.\n"
+                      f"{stock_analysis.EVIDENCE_HEADING}\n- 전환 가능 물량",
+        citations=["DOC-1", "DOC-3"]))
     async def search(corp_code, query):
         return [{"rcept_no": RECEIPT[:-1] + corp_code[-1], "report_nm": "공시",
                  "chunk_text": "2026.11.21 희석률은 3.5%입니다."}]
@@ -269,8 +277,9 @@ def test_top_three_worker_isolation_guardrail_and_repeated_requests(monkeypatch)
                 assert row["analysis_text"] == (f"2026.11.21 기준 [{receipt}] 희석률은 3.5%입니다. "
                                                 "수급은 안정적입니다.")
                 assert row["citations"] == [receipt]
-            summary = state["final_report"].split("### 종합 진단")[1]
-            assert f"[{RECEIPT[:-1]}2]" in summary and f"[{RECEIPT[:-1]}4]" in summary
+            summary, evidence = state["final_report"].split(stock_analysis.EVIDENCE_HEADING)
+            assert "[DOC-1]과 [DOC-3]에 근거한 진단입니다." in summary
+            assert f"rcpNo={RECEIPT[:-1]}2" in evidence and f"rcpNo={RECEIPT[:-1]}4" in evidence
             assert "발행은 확정" not in state["final_report"]
             assert all("DOC-99" in w for w in state["guardrail_warnings"])
             assert state["quant_scorecards"]["000001"]["total"] == 90
@@ -320,7 +329,7 @@ def test_simulation_uses_orderable_cash_and_module3(monkeypatch):
     market.orderable_cash.assert_awaited_once_with(h)
     result = state["simulation_result"]
     assert result["buy_quantity"] == D(2) and result["remaining_cash"] == D(300)
-    assert result["weight"] == D("0.3") and "| 예상 비중 | 30.00% |" in state["final_report"]
+    assert result["weight"] == D("0.3") and "예상 비중은 30.00%입니다." in state["final_report"]
 
 
 def test_provider_error_terminates_stream(monkeypatch):
@@ -359,7 +368,7 @@ def test_cloud_prompts_allow_only_masked_indicators_and_disclosures(monkeypatch)
 
     structured.side_effect = record
     state = asyncio.run(build_graph(market).ainvoke({"user_query": query}))
-    assert "### 종합 진단" in state["final_report"]
+    assert stock_analysis.ANSWER_HEADING in state["final_report"]
     worker = json.loads(captured[stock_analysis.Analysis].await_args.args[0][-1][1])
     synthesis = llm.ChatGoogleGenerativeAI.return_value.with_structured_output.return_value.ainvoke
     portfolio = json.loads(synthesis.await_args.args[0][-1][1])
@@ -413,6 +422,8 @@ def test_total_llm_outage_streams_scores_simulation_and_disclosure_evidence(monk
 
 
 def test_real_langchain_adapters_parse_gemini_fallback(monkeypatch):
+    from unittest.mock import PropertyMock
+
     from google.genai.models import AsyncModels
     from google.genai.types import GenerateContentResponse
     from openai import RateLimitError
@@ -425,7 +436,7 @@ def test_real_langchain_adapters_parse_gemini_fallback(monkeypatch):
     google = AsyncMock(return_value=GenerateContentResponse.model_validate({"candidates": [{
         "content": {"role": "model", "parts": [{"text": '{"analysis_text":"공시 분석","citations":[]}'}]},
         "finishReason": "STOP"}]}))
-    monkeypatch.setattr(AsyncCompletions, "create", dash)
+    monkeypatch.setattr(AsyncCompletions, "with_raw_response", PropertyMock(return_value=Mock(parse=dash)))
     monkeypatch.setattr(AsyncModels, "generate_content", google)
     assert asyncio.run(stock_analysis.analyze('{"name":"가상 종목"}')) == {"analysis_text": "공시 분석", "citations": []}
     dash.assert_awaited_once()
