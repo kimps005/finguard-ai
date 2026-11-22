@@ -8,11 +8,13 @@ import operator
 import re
 from typing import Annotated, Literal, TypedDict
 
+from pydantic import BaseModel
+
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, Send
 
-from backend import stock_analysis
+from backend import llm, stock_analysis
 from backend.broker import Balance
 from backend.finance_calc import calculate_scorecard, simulate_purchase
 from backend.portfolio_market import MarketData, ScoreInputs
@@ -38,7 +40,11 @@ class PortfolioState(Query, total=False):
     score_inputs: dict[str, ScoreInputs]
 
 
-def router_node(state):
+class Intent(BaseModel):
+    intent_type: Literal["fast_lookup", "deep_diagnosis", "simulation"]
+
+
+async def router_node(state):
     query = re.sub(r"\s+", "", state["user_query"].lower())
     lookup = re.search(r"잔고|잔액|현금|예수금|현재가|주가|시세|평단|평가액|수익률|보유|비중|평가손익|fast_lookup", query)
     diagnosis = re.search(
@@ -50,7 +56,17 @@ def router_node(state):
         intent = "fast_lookup"
     else:
         intent = "deep_diagnosis"
-    return {"intent_type": intent, "verified_stock_results": [], "guardrail_warnings": [],
+    warnings = []
+    try:
+        # Preserve the fast path's first-token budget if the cloud classifier is slow.
+        async with asyncio.timeout(0.25 if intent == "fast_lookup" else None):
+            question = re.sub(r"\d[\d,./ -]*", "○", state["user_query"])
+            response = await llm.invoke("router", "사용자 요청을 분류하라. 단순 조회는 fast_lookup, "
+                                        "가정 매수는 simulation, 그 외 분석은 deep_diagnosis다.", question, Intent)
+            intent = response.intent_type
+    except (llm.LLMUnavailable, TimeoutError):
+        warnings.append("라우터 LLM 응답을 받지 못해 로컬 규칙으로 요청을 분류했습니다.")
+    return {"intent_type": intent, "verified_stock_results": [], "guardrail_warnings": warnings,
             "quant_scorecards": {}, "macro_context": None, "simulation_result": None}
 
 
@@ -67,7 +83,7 @@ def route_to_stock_workers(state: PortfolioState) -> str | list[Send]:
         return "synthesizer_node"
     top = sorted(stocks, key=lambda s: (-s["weight"], s["stock_code"]))[:3]
     return [Send("stock_worker", {
-        "stock": stock, "query": state["user_query"], "macro": state["macro_context"],
+        "stock": stock, "query": state["user_query"],
         "scorecard": state["quant_scorecards"][stock["stock_code"]],
         "events": state["score_inputs"][stock["stock_code"]].events or [],
     }) for stock in top]
@@ -142,8 +158,17 @@ def report_parts(state):
     for row in state["verified_stock_results"]:
         if row["analysis_text"]:
             yield f"\n\n### {row['stock_code']}\n{row['analysis_text']}"
-    if state["guardrail_warnings"]:
-        yield "\n\n근거 또는 형식을 확인할 수 없는 분석 내용은 제외했습니다."
+    for row in state["stock_analysis_results"]:
+        if row["doc_map"]:
+            yield f"\n\n### {row['stock_code']} 근거 공시"
+            titles = {doc["source"]: doc["title"] for doc in row["disclosures"]}
+            for alias, receipt in row["doc_map"].items():
+                yield (f"\n- {alias} · {titles.get(alias, '오버행 공시')} "
+                       f"[{receipt}](https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt})")
+        if row["news"]:
+            yield f"\n\n### {row['stock_code']} 관련 뉴스"
+            for article in row["news"]:
+                yield f"\n- {article['title']}"
 
 
 def build_graph(market: MarketData):
@@ -178,11 +203,13 @@ def build_graph(market: MarketData):
         return Command(goto=route_to_stock_workers(state))
 
     async def stock_worker(job):
-        result = await stock_analysis.analyze_stock(job, market.external, market.broker.http)
+        result = await stock_analysis.analyze_stock(job, market.external)
         return {"stock_analysis_results": [result]}
 
     async def guardrail_node(state):
-        return await asyncio.to_thread(stock_analysis.verify_results, state["stock_analysis_results"])
+        verified = await asyncio.to_thread(stock_analysis.verify_results, state["stock_analysis_results"])
+        verified["guardrail_warnings"] = state["guardrail_warnings"] + verified["guardrail_warnings"]
+        return verified
 
     async def synthesizer_node(state):
         write = get_stream_writer()
@@ -190,7 +217,22 @@ def build_graph(market: MarketData):
         for part in report_parts(state):
             write({"text": part})
             parts.append(part)
-        return {"final_report": "".join(parts)}
+        warnings = list(state["guardrail_warnings"])
+        if state["intent_type"] != "fast_lookup" and state["holdings"]:
+            try:
+                summary, notes = await stock_analysis.synthesize(state)
+                warnings.extend(notes)
+                if summary:
+                    part = f"\n\n### 종합 진단\n{summary}"
+                    write({"text": part})
+                    parts.append(part)
+            except llm.LLMUnavailable:
+                warnings.append("종합 LLM을 사용할 수 없어 로컬 정량 리포트를 제공합니다.")
+        if warnings:
+            part = "\n\n" + "\n".join(f"> {warning}" for warning in warnings)
+            write({"text": part})
+            parts.append(part)
+        return {"final_report": "".join(parts), "guardrail_warnings": warnings}
 
     # Only the query crosses the request boundary. No checkpointer retains reducer channels.
     graph = StateGraph(PortfolioState, input_schema=Query)

@@ -1,4 +1,4 @@
-# \[최종 동결 마스터 PRD v3.7\] FinGuard AI: 개인 계좌 및 다중 금융 데이터 기반 멀티 에이전트 포트폴리오 진단 플랫폼
+# \[최종 동결 마스터 PRD v3.8\] FinGuard AI: 개인 계좌 및 다중 금융 데이터 기반 멀티 에이전트 포트폴리오 진단 플랫폼
 
 ## 1. 프로젝트 개요 (Overview)
 
@@ -40,7 +40,7 @@
 
   1. **단순 조회 (Fast Path):** *"내 잔고랑 현재가 얼마야?"* 요청 시 Router가 `fast_lookup`으로 판별, DART/RAG/ETL을 우회하고 `Fast Quote Node`에서 증권사 잔고·현재가만 단일 조회한 뒤 1.0초 이내 스트리밍 시작.
 
-  2. **원클릭 종합 리스크 스캔 (Warm/Cold Path):** *"내 계좌 지금 위험한 거 없어?"* 요청 시 Router가 `deep_diagnosis`로 판별, 보유 종목 Top-N 통합 워커가 공시 악재, 미상환 CB 희석률, 뉴스 이상 징후를 비중 순으로 브리핑 (우선주는 보통주 공시 추적, ETF/ETN은 공시·재무 단계를 우회하여 수급·수익률 브리핑).
+  2. **원클릭 종합 리스크 스캔 (Warm/Cold Path):** *"내 계좌 지금 위험한 거 없어?"* 요청 시 Router가 `deep_diagnosis`로 판별, 비중 상위 Top-N 워커의 공시 분석과 로컬에서 계산한 미상환 CB 희석률·수집한 뉴스 제목을 리포트에서 종목별로 브리핑 (우선주는 보통주 공시 추적, ETF/ETN은 공시·재무 단계를 우회하여 수급·수익률 브리핑).
 
   3. **이벤트·공시 맞춤형 영향도 정밀 진단:** *"보유 중인 A 종목 최근 전환사채 발행이랑 보호예수 해제가 내 평단가 기준으로 얼마나 위험해?"* 요청 시 원문 조항과 `overhang_events` 캐싱 데이터를 결합하여 대응 전략 제시.
 
@@ -67,6 +67,18 @@
   * **PostgreSQL 15+ & `pgvector`:** `stock_master` 통합 매핑 테이블, `overhang_events`(미상환 CB/BW 희석률 캐싱), DART 공시 청크 저장. `kiwipiepy` 형태소 토큰화 기반 `TSVECTOR` GIN 키워드 인덱스(`search_tsv`) + `corp_code` B-Tree 인덱스 기반 Exact Cosine Scan.
 
   * **Redis:** 컨테이너 재시작 시에도 증권사 OAuth 토큰, ECOS 환율/금리 데이터(24시간 TTL) 및 공공 API 캐시 유지, `etl_lock:{corp_code}` (`SETNX`, TTL 10분) 중복 백그라운드 인제스트 방지.
+
+#### 생성형 LLM 배치 및 개인정보 경계
+
+| 역할 | 모델 환경변수와 기본값 | 제공자 |
+| --- | --- | --- |
+| Node 1 의도 분류 | `ROUTER_MODEL=qwen3.7-plus` | Alibaba Cloud Model Studio (DashScope) |
+| Node 4 Top-N 종목 분석 | `WORKER_MODEL=qwen3.8-flash` | DashScope |
+| Node 6 종합 진단 및 Module 8 RAGAS Judge | `SYNTHESIZER_MODEL=gemini-3.8-flash` | Google AI Studio (Gemini API) |
+
+* DashScope는 `DASHSCOPE_API_KEY` 및 `DASHSCOPE_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1`로 접속한다. 429, 403 또는 할당량 소진 시 즉시 같은 입력으로 Gemini를 한 번 호출한다. Gemini는 `GEMINI_API_KEY`를 사용한다.
+* Workers와 Synthesizer는 종목명, 포트폴리오 비중(%), 수익률(%), 100점 스코어카드 점수, DOC-N 별칭이 붙은 DART 공시 청크만 받는다. 계좌번호, 보유 수량, 원화 평가액·예수금, 자유 입력 질문과 시뮬레이션 결과는 이 프롬프트에서 제외한다. 뉴스·거시 지표는 로컬 리포트에서 결합한다.
+* 키 미설정, 네트워크 또는 한도 오류 시 Router는 로컬 의도 분류를 사용한다. 단순 조회 후보는 첫 토큰 예산을 위해 라우터 대기를 250ms로 제한한다. 워커 장애는 종목별로 격리한다. 종합 노드까지 실패해도 Python의 100점 스코어카드·희석률·시뮬레이션 및 종목별 DOC-N 근거 공시 목록을 경고 배너와 함께 반환한다. SSE는 `status → token → done(ok=true)`로 완료한다.
 
 ### 3.2 종목 식별자 통합 매핑 & 오버행 DB 스키마
 
@@ -128,7 +140,7 @@ CREATE TABLE overhang_events (
 1. **증권사 Open API 이원화 & Rate Limiting 방어:**
 
    * `.env`의 기본 계좌 제공자는 `BROKER_PROVIDER=toss`다. 토스증권 Open API로 국내 원화 보유 종목과 매수 가능 금액을 조회한다. 전체 예수금과 현금 비중은 API에서 확인할 수 없으므로 미제공으로 표시한다.
-   * `BROKER_PROVIDER=kis`에서 계좌/잔고 조회는 `IS_VIRTUAL=true/false`로 분기한다. 두 계좌 제공자 모두 시세·일봉·수급 데이터는 KIS 실전 도메인 또는 PyKRX에서 조회한다.
+   * `BROKER_PROVIDER=kis`에서 계좌/잔고 조회는 `IS_VIRTUAL=true/false`로 분기한다. 실전 계좌 전용 운영에는 `IS_VIRTUAL=false`와 실전 키·계좌번호만 필요하다. `KIS_VIRTUAL_*`는 시연·테스트에서 모의 계좌를 선택할 때만 입력한다. 두 계좌 제공자 모두 시세·일봉·수급 데이터는 KIS 실전 도메인 또는 PyKRX에서 조회한다.
 
    * `asyncio.gather()` 호출 시 `asyncio.Semaphore(2)` + 지수 백오프(Exponential Backoff) 적용.
 
@@ -166,7 +178,7 @@ CREATE TABLE overhang_events (
                      [User Query] (Next.js PIN 검증 완료)
                           │
                           ▼
-                 [1. Router Node]
+                 [1. Router Node · qwen3.7-plus]
                   │              │
      (fast_lookup)│              │(deep_diagnosis / simulation)
                   ▼              ▼
@@ -179,8 +191,8 @@ CREATE TABLE overhang_events (
                   │              │
                   │              ▼
                   │     [4. Integrated Top-N Stock Fan-Out (Send API)]
-                  │     ├── Stock Worker 1 (DOC-N 청크 + 오버행 + 뉴스 통합 분석, doc_map 캡슐화)
-                  │     ├── Stock Worker 2 (DOC-N 청크 + 오버행 + 뉴스 통합 분석, doc_map 캡슐화)
+                  │     ├── Stock Worker 1 (qwen3.8-flash · 허용 지표 + DOC-N 청크 분석, doc_map 캡슐화)
+                  │     ├── Stock Worker 2 (qwen3.8-flash · 허용 지표 + DOC-N 청크 분석, doc_map 캡슐화)
                   │     └── (대상 0개 시 "synthesizer_node" 엣지 우회 반환)
                   │              │
                   │              ▼
@@ -189,7 +201,7 @@ CREATE TABLE overhang_events (
                   │              │
                   └──────────────┴────────┐
                                           ▼
-                               [6. Fast Quote / Synthesizer Node]
+                               [6. Fast Quote / Synthesizer · gemini-3.8-flash]
                                (Next.js로 SSE 스트리밍 출력)
 ```
 
@@ -221,7 +233,7 @@ class PortfolioState(TypedDict):
     macro_context: Optional[Dict]                                 # ECOS 환율/금리 수집 데이터 (Node 2 주입)
     stock_analysis_results: Annotated[List[Dict], operator.add]   # Fan-Out 워커 원본 병렬 수집 버퍼
     verified_stock_results: List[Dict]                            # Guardrail 검증 완료 결과 (리듀서 없음 - 중복 누적 방지)
-    guardrail_warnings: List[str]                                 # 검증 실패로 Drop된 인용 경고 메시지
+    guardrail_warnings: List[str]                                 # 인용 검증 및 LLM 부분 장애 경고 메시지
     simulation_result: Optional[Dict]                             # 물타기/리밸런싱 Python 정량 연산 결과
     final_report: str                                             # 최종 종합 진단 리포트
 ```
@@ -295,9 +307,9 @@ class PortfolioState(TypedDict):
 | **Module 3** | **결정론적 금융 연산 Engine** | Trailing PER/PBR, 동일 `fs_div` 쌍 & XBRL `account_id` 기반 4분기 역산, ETF 우회 처리, 물타기 시뮬레이터, 100점 정량 스코어카드 Engine | `pytest tests/test_finance_calc.py` 100% 통과 (수치 오차 0%) $\rightarrow$ Commit & `/clear` | 
 | **Module 4** | **DART ETL & `kiwipiepy` RAG** | `overhang_events` `NULLS NOT DISTINCT` Upsert, Markdown 표 청킹, `TSVECTOR` GIN `ts_rank` + `corp_code` Exact Scan, PyTorch FP16 `bge-m3`/`bge-reranker-v2-m3` `gpu_semaphore(1)` | `overhang_events` 기재정정 중복 방지 및 VRAM 2.2GB 이내 Exact Scan 검색 확인 $\rightarrow$ Commit & `/clear` | 
 | **Module 5** | **외부 데이터 커넥터 3종** | 금융위 의무보호예수 API (`isin_cd` 및 Fallback), 네이버 뉴스 API, ECOS 환율/금리 API (`macro_context` 채우기) | 비동기 수집 및 Redis 캐싱 확인, 보호예수 Fallback 검증 $\rightarrow$ Commit & `/clear` | 
-| **Module 6** | **LangGraph 멀티 에이전트** | `PortfolioState`(`verified_stock_results` 분리), `Fast Quote Node` 경량 분기, Top-N 통합 워커 Fan-Out (0개 시 우회 분기), `kiwi.split_into_sents()` Guardrail & Drop | Plan Mode로 구조 확정. Fast Path $< 1.0\text{s}$, empty Fan-Out 무사통과 및 `DOC-N` 문장 단위 Drop 검증 $\rightarrow$ Commit & `/clear` | 
+| **Module 6** | **LangGraph 멀티 에이전트** | `PortfolioState`(`verified_stock_results` 분리), `Fast Quote Node` 경량 분기, Top-N 통합 워커 Fan-Out (0개 시 우회 분기), `kiwi.split_into_sents()` Guardrail & Drop | Plan Mode로 구조 확정. Fast Path $< 1.0\text{s}$, empty Fan-Out 무사통과 및 `DOC-N` 문장 단위 Drop, 마스킹, Gemini 전환, LLM 전면 장애 시 정상 SSE 완료 검증 $\rightarrow$ Commit & `/clear` |
 | **Module 7** | **Next.js 14 대시보드 & 보안** | Next.js 14 App Router 대시보드 UI, Next.js PIN 프록시 Route Handler, SSE 스트리밍 연동 | PIN 검증, 무인증 통신 차단 및 브리핑 마크다운 스트리밍 확인 $\rightarrow$ Commit & `/clear` | 
-| **Module 8** | **RAGAS 평가 & README** | 5대 이벤트별 20건 RAGAS 평가 스크립트 실행, Warm/Cold Latency 벤치마크 측정, `README.md` 작성 | `README.md` 내 Mermaid 다이어그램 및 RAGAS 정량 지표 수치 기록 | 
+| **Module 8** | **RAGAS 평가 & README** | Gemini Judge로 5대 이벤트별 20건 RAGAS 평가 스크립트 실행, Warm/Cold Latency 벤치마크 측정, `README.md` 작성 | `README.md` 내 Mermaid 다이어그램 및 RAGAS 정량 지표 수치 기록 |
 
 ## 8. AI 에이전트 교대 개발 가이드라인 (Codex & Claude Code 협업 규칙)
 
@@ -310,7 +322,7 @@ class PortfolioState(TypedDict):
 # FinGuard AI - Agent Engineering Rules
 
 ## 1. Absolute Context Directive
-- Primary Specification: `docs/finguard_ai_prd_v3.7.md`
+- Primary Specification: `docs/finguard_ai_prd_v3.8.md`
 - Always read the PRD module section before implementing code. Never alter architectural constraints.
 
 ## 2. Python Environment & Execution Constraints
@@ -319,6 +331,7 @@ class PortfolioState(TypedDict):
 - Process Concurrency: Uvicorn MUST run with `workers=1` (Single-Tenant VRAM protection).
 
 ## 3. Mandatory Engineering Rules
+- Cloud models: use DashScope for Node 1/4 and Gemini for Node 6 and the RAGAS judge. Follow section 3.1 for quotas, the outbound field allowlist and deterministic reports during outages.
 - Model Loading: NEVER use `fastembed`. ALWAYS use `sentence-transformers` & `CrossEncoder` with `torch.float16` for `BAAI/bge-m3` and `BAAI/bge-reranker-v2-m3`.
 - Financial Calculations: ALWAYS use Python `decimal.Decimal` (No `float` rounding errors).
 - DB Schema: Respect `UNIQUE NULLS NOT DISTINCT` on `overhang_events` and `crno`-based `corp_code` inheritance for preferred stocks (`stock_master`).

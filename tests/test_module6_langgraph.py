@@ -1,14 +1,15 @@
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal as D
 import json
 from time import perf_counter
-from unittest.mock import AsyncMock, create_autospec
+from unittest.mock import AsyncMock, Mock, create_autospec
 
 import httpx
 import pytest
 
-from backend import dart_rag, portfolio_market, stock_analysis
+from backend import dart_rag, llm, portfolio_market, stock_analysis
 from backend.broker import (
     KST, LIVE, VIRTUAL, Balance, BrokerConnector, BrokerSettings, Credentials, DailyBar,
     FiveDayFlow, Holding, InvestorFlow,
@@ -16,7 +17,7 @@ from backend.broker import (
 from backend.connectors import ExternalConnectors
 from backend.dart_etl import DartETL
 from backend.main import app, chat_events
-from backend.portfolio_graph import build_graph, route_to_stock_workers
+from backend.portfolio_graph import Intent, build_graph, route_to_stock_workers
 from backend.portfolio_market import MarketData
 from backend.sync_stock_master import Stock
 
@@ -63,7 +64,26 @@ def setup_market(monkeypatch, positions):
     answer = {"analysis_text": "2026.11.21 기준 [DOC-1] 희석률은 3.5%입니다. "
                                "[DOC-99] 발행은 확정됐습니다. 수급은 안정적입니다.",
               "citations": ["DOC-1", "DOC-99"], "doc_map": {"DOC-99": RECEIPT}}
-    monkeypatch.setattr(stock_analysis, "analyze", AsyncMock(return_value=answer))
+    async def classify(messages):
+        question = messages[-1][1]
+        if "추매" in question:
+            return Intent(intent_type="simulation")
+        if "잔고" in question:
+            return Intent(intent_type="fast_lookup")
+        return Intent(intent_type="deep_diagnosis")
+
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dash-test")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test")
+    router = AsyncMock(side_effect=classify)
+    worker = AsyncMock(return_value=stock_analysis.Analysis(**answer))
+    summary = AsyncMock(return_value=stock_analysis.Analysis(analysis_text="종합 분석입니다.", citations=[]))
+    dash = Mock()
+    dash.return_value.with_structured_output.side_effect = lambda schema, **_: Mock(
+        ainvoke=router if schema is Intent else worker)
+    google = Mock()
+    google.return_value.with_structured_output.return_value.ainvoke = summary
+    monkeypatch.setattr(llm, "ChatOpenAI", dash)
+    monkeypatch.setattr(llm, "ChatGoogleGenerativeAI", google)
     return MarketData(broker, etl, external)
 
 
@@ -72,29 +92,33 @@ def parse_frame(frame):
     return event.removeprefix("event: "), json.loads(data.removeprefix("data: "))
 
 
-def test_stock_analysis_uses_gemini_with_structured_output(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-    monkeypatch.setenv("GEMINI_MODEL", "models/gemini-test")
-    answer = {"analysis_text": "[DOC-1] 예시 공시입니다.", "citations": ["DOC-1"]}
+@pytest.mark.parametrize("role,model", [("router", "qwen3.7-plus"), ("worker", "qwen3.8-flash")])
+@pytest.mark.parametrize("status", [403, 429, 400])
+def test_dashscope_quota_falls_back_once_to_gemini(monkeypatch, role, model, status):
+    from openai import APIStatusError
 
-    def respond(request):
-        assert request.url == "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent"
-        assert request.headers["x-goog-api-key"] == "test-key"
-        body = json.loads(request.content)
-        assert "[DOC-N]" in body["systemInstruction"]["parts"][0]["text"]
-        assert body["contents"] == [{"role": "user", "parts": [{"text": "가상 공시"}]}]
-        assert body["generationConfig"]["responseMimeType"] == "application/json"
-        assert body["generationConfig"]["responseJsonSchema"]["required"] == ["analysis_text", "citations"]
-        return httpx.Response(200, json={"candidates": [{"content": {"parts": [
-            {"thought": True, "text": "internal notes"},
-            {"text": json.dumps(answer)},
-        ]}}]})
-
-    async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
-            assert await stock_analysis.analyze(http, "가상 공시") == answer
-
-    asyncio.run(run())
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dash-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
+    for key in ("ROUTER_MODEL", "WORKER_MODEL", "SYNTHESIZER_MODEL", "DASHSCOPE_BASE_URL"):
+        monkeypatch.delenv(key, raising=False)
+    body = {"code": "AllocationQuota.FreeTierOnly"} if status == 400 else {}
+    error = APIStatusError(str(body), response=httpx.Response(status, request=httpx.Request("POST", "https://test")),
+                           body=body)
+    dash, google = Mock(), Mock()
+    primary = AsyncMock(side_effect=error)
+    fallback = AsyncMock(return_value=Intent(intent_type="deep_diagnosis"))
+    dash.return_value.with_structured_output.return_value.ainvoke = primary
+    google.return_value.with_structured_output.return_value.ainvoke = fallback
+    monkeypatch.setattr(llm, "ChatOpenAI", dash)
+    monkeypatch.setattr(llm, "ChatGoogleGenerativeAI", google)
+    result = asyncio.run(llm.invoke(role, "분류", "공시", Intent))
+    assert result.intent_type == "deep_diagnosis"
+    assert dash.call_args.kwargs == dict(api_key="dash-key", model=model, base_url=llm.BASE_URL,
+                                         temperature=0, timeout=15, max_retries=0)
+    assert google.call_args.kwargs["model"] == "gemini-3.8-flash"
+    assert google.call_args.kwargs["google_api_key"] == "gemini-key"
+    primary.assert_awaited_once()
+    fallback.assert_awaited_once_with(*primary.await_args.args)
 
 
 @pytest.mark.parametrize("positions", [[], [position(asset="ETF")]])
@@ -189,7 +213,8 @@ def test_fast_path_stream_and_latency(monkeypatch):
     assert not market.etl.method_calls and not market.external.method_calls
     assert not market.broker.get_five_day_flow.called and not dart_rag.search.called
     portfolio_market.stock_master.assert_not_called()
-    stock_analysis.analyze.assert_not_called()
+    llm.ChatOpenAI.assert_called_once()
+    llm.ChatGoogleGenerativeAI.assert_not_called()
 
 
 @pytest.mark.parametrize("positions", [[], [position(asset="ETF", weight="1")],
@@ -216,6 +241,9 @@ def test_top_three_worker_isolation_guardrail_and_repeated_requests(monkeypatch)
     market = setup_market(monkeypatch, [*positions, position("000005", asset="ETF", weight="0.5")])
     graph = build_graph(market)
 
+    synthesis = llm.ChatGoogleGenerativeAI.return_value.with_structured_output.return_value.ainvoke
+    synthesis.return_value = stock_analysis.Analysis(
+        analysis_text="[DOC-1] 첫 근거입니다. [DOC-3] 다른 종목의 근거입니다.", citations=["DOC-1", "DOC-3"])
     async def search(corp_code, query):
         return [{"rcept_no": RECEIPT[:-1] + corp_code[-1], "report_nm": "공시",
                  "chunk_text": "2026.11.21 희석률은 3.5%입니다."}]
@@ -236,13 +264,10 @@ def test_top_three_worker_isolation_guardrail_and_repeated_requests(monkeypatch)
                 assert row["analysis_text"] == (f"2026.11.21 기준 [{receipt}] 희석률은 3.5%입니다. "
                                                 "수급은 안정적입니다.")
                 assert row["citations"] == [receipt]
+            summary = state["final_report"].split("### 종합 진단")[1]
+            assert f"[{RECEIPT[:-1]}2]" in summary and f"[{RECEIPT[:-1]}4]" in summary
             assert "발행은 확정" not in state["final_report"]
             assert all("DOC-99" in w for w in state["guardrail_warnings"])
-            for call in stock_analysis.analyze.await_args_list:
-                context = call.args[1]
-                assert not stock_analysis.RECEIPT.search(context)
-                data = json.loads(context)
-                assert data["overhang"] and data["news"] and data["disclosures"]
             assert state["quant_scorecards"]["000001"]["total"] == 90
     asyncio.run(check())
 
@@ -312,3 +337,87 @@ def test_health_and_request_boundary():
                 response = await client.post("/api/v1/chat/stream", json=payload)
                 assert response.status_code == 422
     asyncio.run(check())
+
+def test_cloud_prompts_allow_only_masked_indicators_and_disclosures(monkeypatch):
+    stock = replace(position(), quantity=D("812345"), market_value=D("987654321"))
+    market = setup_market(monkeypatch, [stock])
+    market.broker.get_balance.return_value = Balance(D("987123456"), D("1974777777"), D("0.50"), (stock,))
+    query = "계좌 87654321-01의 812345주, 평가액 987654321원, 예수금 987123456원 위험 진단"
+    captured = {}
+    structured = llm.ChatOpenAI.return_value.with_structured_output
+    original = structured.side_effect
+
+    def record(schema, **kwargs):
+        runnable = original(schema, **kwargs)
+        captured[schema] = runnable.ainvoke
+        return runnable
+
+    structured.side_effect = record
+    state = asyncio.run(build_graph(market).ainvoke({"user_query": query}))
+    assert "### 종합 진단" in state["final_report"]
+    worker = json.loads(captured[stock_analysis.Analysis].await_args.args[0][-1][1])
+    synthesis = llm.ChatGoogleGenerativeAI.return_value.with_structured_output.return_value.ainvoke
+    portfolio = json.loads(synthesis.await_args.args[0][-1][1])
+    assert portfolio == [worker]
+    assert worker == {"name": stock.name, "weight_pct": "20.0", "profit_loss_pct": "-16.67", "scorecard": 90,
+                      "disclosures": [{"source": "DOC-1", "title": "발행결정", "text": "희석률은 3.5%다."}]}
+    for secret in ("87654321", "812345", "987654321", "987123456", "1974777777", RECEIPT):
+        for invocation in (*captured.values(), synthesis):
+            assert secret not in str(invocation.await_args)
+
+
+@pytest.mark.parametrize("missing_keys", [False, True])
+def test_total_llm_outage_streams_scores_simulation_and_disclosure_evidence(monkeypatch, missing_keys):
+    stock = position()
+    market = setup_market(monkeypatch, [stock])
+    market.orderable_cash = AsyncMock(return_value=D(500))
+    if missing_keys:
+        monkeypatch.delenv("DASHSCOPE_API_KEY")
+        monkeypatch.delenv("GEMINI_API_KEY")
+    else:
+        failure = httpx.HTTPStatusError("private-provider-detail", request=httpx.Request("POST", "https://test"),
+                                        response=httpx.Response(429))
+        llm.ChatOpenAI.return_value.with_structured_output.side_effect = None
+        llm.ChatOpenAI.return_value.with_structured_output.return_value.ainvoke = AsyncMock(side_effect=failure)
+        llm.ChatGoogleGenerativeAI.return_value.with_structured_output.return_value.ainvoke = AsyncMock(
+            side_effect=TimeoutError("private-provider-detail"))
+
+    async def read():
+        return [parse_frame(f) async for f in chat_events(build_graph(market), f"{stock.name} 200원 추매하면?")]
+
+    frames = asyncio.run(read())
+    events = [event for event, _ in frames]
+    assert events[0] == "status" and events[-1] == "done" and "error" not in events
+    done = frames[-1][1]
+    assert done["ok"] and done["quant_scorecards"][stock.stock_code]["total"] == 90
+    assert done["quant_scorecards"][stock.stock_code]["dilution_pct"] == "0.1"
+    assert done["simulation_result"]["buy_quantity"] == "2"
+    assert done["verified_stock_results"][0]["evidence"] == {"DOC-1": RECEIPT}
+    report = "".join(data["text"] for kind, data in frames if kind == "token")
+    assert report == done["final_report"] and "90/100" in report and "DOC-1" in report and RECEIPT in report
+    assert len(done["guardrail_warnings"]) == 3 and "종합 LLM" in report and "private-provider-detail" not in report
+    if missing_keys:
+        llm.ChatOpenAI.assert_not_called()
+        llm.ChatGoogleGenerativeAI.assert_not_called()
+    else:
+        assert llm.ChatGoogleGenerativeAI.call_count == 3
+
+
+def test_real_langchain_adapters_parse_gemini_fallback(monkeypatch):
+    from google.genai.models import AsyncModels
+    from google.genai.types import GenerateContentResponse
+    from openai import RateLimitError
+    from openai.resources.chat.completions import AsyncCompletions
+
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "offline-dash")
+    monkeypatch.setenv("GEMINI_API_KEY", "offline-gemini")
+    response = httpx.Response(429, request=httpx.Request("POST", "https://test"))
+    dash = AsyncMock(side_effect=RateLimitError("rate limit", response=response, body={}))
+    google = AsyncMock(return_value=GenerateContentResponse.model_validate({"candidates": [{
+        "content": {"role": "model", "parts": [{"text": '{"analysis_text":"공시 분석","citations":[]}'}]},
+        "finishReason": "STOP"}]}))
+    monkeypatch.setattr(AsyncCompletions, "create", dash)
+    monkeypatch.setattr(AsyncModels, "generate_content", google)
+    assert asyncio.run(stock_analysis.analyze('{"name":"가상 종목"}')) == {"analysis_text": "공시 분석", "citations": []}
+    dash.assert_awaited_once()
+    google.assert_awaited_once()

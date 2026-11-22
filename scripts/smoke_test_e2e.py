@@ -20,7 +20,7 @@ import uvicorn
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from backend import dart_rag, stock_analysis
+from backend import dart_rag, llm, stock_analysis
 from backend.broker import Balance, FiveDayFlow, Holding, InvestorFlow
 from backend.main import app
 from backend.portfolio_graph import build_graph
@@ -107,6 +107,7 @@ async def run_backend(client, first_status_received):
     with (
         patch.object(app.router, "lifespan_context", fixture_lifespan),
         patch.object(dart_rag, "search", AsyncMock(return_value=rows)),
+        patch.object(llm, "invoke", AsyncMock(side_effect=llm.LLMUnavailable)),
         patch.object(stock_analysis, "analyze", AsyncMock(return_value=answer)),
         socket.socket() as listener,
     ):

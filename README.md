@@ -1,10 +1,10 @@
 # FinGuard AI
 
-국내 주식 계좌의 공시, 오버행, 수급, 뉴스, 환율·금리 위험을 점검하는 단일 사용자용 포트폴리오 진단 도구입니다. 보통주·우선주·ETF·ETN을 지원하며, 증권사 API는 잔고·시세·주문 가능 현금 조회에 사용합니다. 매수 시뮬레이션은 조회한 계좌 스냅샷으로 계산합니다. [PRD v3.7](docs/finguard_ai_prd_v3.7.md)
+국내 주식 계좌의 공시, 오버행, 수급, 뉴스, 환율·금리 위험을 점검하는 단일 사용자용 포트폴리오 진단 도구입니다. 보통주·우선주·ETF·ETN을 지원하며, 증권사 API는 잔고·시세·주문 가능 현금 조회에 사용합니다. 매수 시뮬레이션은 조회한 계좌 스냅샷으로 계산합니다. [PRD v3.8](docs/finguard_ai_prd_v3.8.md)
 
 ## 아키텍처
 
-- **정형 수치와 비정형 분석 분리.** Zero-Hallucination 설계 원칙에 따라 정형 API와 오버행 DB에서 가져온 수치는 Python Decimal 엔진이 계산합니다. 스코어카드, 오버행 희석률, 보유 평단가, 예상 평단가는 리포트 생성기가 직접 표시합니다. LLM은 공시·뉴스 등 워커 컨텍스트를 해석합니다. 워커별 DOC-N 별칭은 실제 공시 접수번호로 변환되고, 미등록 별칭이나 원시 접수번호가 있는 문장은 Kiwi 문장 단위로 제외합니다.
+- **정형 수치와 비정형 분석 분리.** Zero-Hallucination 설계 원칙에 따라 정형 API와 오버행 DB에서 가져온 수치는 Python Decimal 엔진이 계산합니다. 스코어카드, 오버행 희석률, 보유 평단가, 예상 평단가는 리포트 생성기가 직접 표시합니다. LLM은 종목명·비중(%)·수익률(%)·정량 점수와 DART 공시 청크를 해석합니다. 원화 금액, 보유 수량, 계좌번호, 사용자 질문은 워커와 종합 노드에 전달하지 않습니다. 워커별 DOC-N 별칭은 실제 공시 접수번호로 변환되고, 미등록 별칭이나 원시 접수번호가 있는 문장은 Kiwi 문장 단위로 제외합니다.
 - **기업 범위 한정 하이브리드 검색.** PostgreSQL 15의 pgvector는 corp_code B-tree로 기업 범위를 먼저 좁힌 뒤 코사인 Exact Scan을 수행합니다. Kiwi 형태소 기반 TSVECTOR GIN·ts_rank 결과를 결합하고 로컬 리랭커로 후보의 순서를 조정합니다. DART 표는 Markdown으로 변환하며 분할 시 헤더를 복제합니다. 오버행 정정 적재는 UNIQUE NULLS NOT DISTINCT 복합키를 사용합니다.
 - **RTX 5060 8GB VRAM 환경.** CUDA 12.8 및 PyTorch FP16으로 BAAI/bge-m3와 BAAI/bge-reranker-v2-m3를 직접 로드합니다. Uvicorn 워커는 1개이며 임베딩과 리랭킹이 asyncio.Semaphore(1)인 gpu_semaphore를 공유합니다. 리랭킹은 최대 길이 1,024와 배치 8을 사용합니다.
 - **우선주 매핑과 ETF 우회.** 종목 마스터 동기화가 동일 crno의 보통주 corp_code를 우선주에 전파합니다. ETF·ETN 등 비주식 자산은 DART, 보호예수, 재무 스코어카드 및 종목 워커를 우회하고 가격·수익률·수급을 요약합니다. Redis는 증권사 OAuth, 외부 API 캐시, 기업별 DART 인제스트 잠금에 사용합니다.
@@ -17,16 +17,18 @@ flowchart TD
     dashboard["Next.js 대시보드"] -->|"POST /api/chat · X-App-Pin"| proxy["Next.js PIN 검증 및 SSE 프록시"]
     proxy -->|"POST /api/v1/chat/stream · user_query"| http["FastAPI chat_events"]
     http --> startNode(["START"])
-    startNode --> router["router_node"]
+    startNode --> router["Router · qwen3.7-plus"]
     router -->|"fast_lookup"| fastQuote["fast_quote_node · 증권사 잔고 조회"]
     router -->|"deep_diagnosis / simulation"| market["market_data_node · 보유 종목 시장 데이터, ECOS, DART 동기 인제스트"]
     market --> quant["quant_scorecard_node · Decimal 스코어카드 및 선택적 매수 시뮬레이션"]
     quant --> fanOut["fan_out_node"]
-    fanOut -->|"Command · Send × 최대 3"| stockWorker["stock_worker · 하이브리드 RAG, 뉴스, LLM 분석, 종목별 doc_map"]
+    fanOut -->|"Command · Send × 최대 3"| stockWorker["Stock Worker · qwen3.8-flash · DOC-N 공시 분석"]
     stockWorker -->|"stock_analysis_results · 병렬 누적"| guardrail["guardrail_node · 검증 및 verified_stock_results 기록"]
-    guardrail --> synthesizer["synthesizer_node · 결정론적 Markdown 조립"]
+    guardrail --> synthesizer["Synthesizer · gemini-3.8-flash + 로컬 정량 리포트"]
     fanOut -->|"대상 0건 · synthesizer_node"| synthesizer
-    fastQuote --> synthesizer
+    fastQuote -->|"로컬 조회 리포트"| synthesizer
+    router -.->|"403 / 429 / 할당량 소진"| fallback["Gemini 대체 호출"]
+    stockWorker -.->|"403 / 429 / 할당량 소진"| fallback
     synthesizer --> endNode(["END"])
     http -.->|"status · token · done 또는 error 후 done"| proxy
     proxy -.->|"타임라인과 Markdown 업데이트"| dashboard
@@ -58,7 +60,17 @@ POSTGRES_PASSWORD와 APP_ACCESS_PIN을 지정합니다. 종목 마스터 동기�
 
 토스증권 연결은 국내 원화 보유 종목과 원화 매수 가능 금액을 조회합니다. API에서 전체 예수금을 제공하지 않아 요약에는 국내 주식 평가액을 표시하며, 전체 계좌 기준 현금 비중과 시뮬레이션 예상 비중은 표시할 수 없습니다. 시장 데이터는 KIS 실전 키가 구성되면 기존 KIS 조회를 사용하고, 실패하거나 키가 없으면 PyKRX로 조회합니다. 한국투자증권 계좌를 연결하려면 `BROKER_PROVIDER=kis`와 해당 계좌의 KIS 설정을 지정합니다. KIS 계좌의 실전·모의 모드는 `IS_VIRTUAL`로 선택합니다.
 
-종목 심층 분석에는 `GEMINI_API_KEY`를 입력합니다. `GEMINI_MODEL`의 기본값은 `gemini-3.8-flash`입니다. 공시 검색의 임베딩과 리랭킹은 백엔드의 CUDA GPU에서 실행됩니다.
+KIS 실전 계좌만 연결할 때는 `IS_VIRTUAL=false`, `KIS_APP_KEY`, `KIS_APP_SECRET`, `KIS_ACCOUNT_NO`를 입력합니다. 계좌 상품 코드는 기본값 `01`을 사용합니다. `KIS_VIRTUAL_*`는 시연·테스트에서 모의 계좌를 선택할 때만 필요합니다.
+
+| 역할 | 모델 설정 및 기본값 | 공급자 키 |
+| --- | --- | --- |
+| Node 1 의도 분류 | `ROUTER_MODEL=qwen3.7-plus` | `DASHSCOPE_API_KEY` |
+| Node 4 Top-3 종목 분석 | `WORKER_MODEL=qwen3.8-flash` | `DASHSCOPE_API_KEY` |
+| Node 6 종합 진단 · Module 8 RAGAS Judge · 대체 호출 | `SYNTHESIZER_MODEL=gemini-3.8-flash` | `GEMINI_API_KEY` |
+
+DashScope의 기본 주소는 `DASHSCOPE_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1`입니다. 429·403 또는 할당량 소진 시 동일한 입력으로 Gemini를 한 번 호출합니다. DashScope 키만 비어 있으면 Gemini를 직접 사용합니다. 단순 조회의 라우터 대기는 최대 250ms입니다. 시간이 지나면 로컬 분류로 잔고·시세 조회를 계속합니다. 공시 검색의 임베딩과 리랭킹은 백엔드의 CUDA GPU에서 실행됩니다.
+
+두 공급자를 모두 사용할 수 없어도 진단은 완료됩니다. 대시보드 경고 배너에서 영향을 받은 단계를 확인할 수 있고, 리포트에는 Python이 계산한 스코어카드·희석률·매수 시뮬레이션과 종목별 DOC-N 공시 링크가 남습니다.
 
 브라우저에서 [http://127.0.0.1:3000](http://127.0.0.1:3000)을 열고 PIN을 입력합니다. 초기 PostgreSQL 볼륨에는 두 마이그레이션이 적용됩니다. 백엔드 시작 시 Module 4 마이그레이션을 재적용하고, 키가 구성된 경우 종목 마스터를 동기화한 뒤 Uvicorn을 시작합니다. GPU 모델 파일은 data/huggingface에 캐시됩니다.
 
@@ -128,7 +140,7 @@ OpenDART 공개 공시에서 전환사채·신주인수권부사채 발행, 유�
 
 Dry-run은 고정 검색 순위와 발췌 답변으로 검증 점수를 계산합니다. 실제 그래프, 인용 검증, SSE 토큰 재구성, 최종 Markdown 채점은 두 모드에서 모두 실행됩니다. 자동 채점기는 오버행 희석률·보유 평단가·예상 평단가·100점 스코어카드 각각을 Decimal 값으로 대조합니다. 예상 평단가는 화면과 동일하게 소수 둘째 자리로 반올림하며, 누락·중복·불일치는 각각 해당 항목의 오류로 집계합니다.
 
-실측은 연결한 PostgreSQL의 임시 스키마에 발췌 코퍼스를 색인하고 운영 코드의 임베딩·하이브리드 검색·리랭킹·답변 생성을 실행합니다. Faithfulness는 가드레일을 거친 워커 답변과 제공 컨텍스트를, Context Precision은 검색 순서와 기준 답변을 비교합니다. 실측에는 public 스키마에 pgvector가 활성화된 DB, 스키마 생성 권한, CUDA GPU, `GEMINI_API_KEY`가 필요합니다. 답변과 채점은 `GEMINI_MODEL`을 사용하며, `--judge-model`로 채점 모델을 지정할 수 있습니다. [RAGAS Faithfulness](https://docs.ragas.io/en/v0.3.9/concepts/metrics/available_metrics/faithfulness/) · [RAGAS Context Precision](https://docs.ragas.io/en/v0.3.9/concepts/metrics/available_metrics/context_precision/)
+실측은 연결한 PostgreSQL의 임시 스키마에 발췌 코퍼스를 색인하고 운영 코드의 임베딩·하이브리드 검색·리랭킹·답변 생성을 실행합니다. Faithfulness는 가드레일을 거친 워커 답변과 제공 컨텍스트를, Context Precision은 검색 순서와 기준 답변을 비교합니다. 실측에는 public 스키마에 pgvector가 활성화된 DB, 스키마 생성 권한, CUDA GPU, `GEMINI_API_KEY`가 필요합니다. 종목 답변은 운영 워커와 동일하게 `WORKER_MODEL` 및 DashScope→Gemini 대체 정책을 사용합니다. Gemini Judge는 기본적으로 `SYNTHESIZER_MODEL`을 사용하며, `--judge-model`로 평가 전용 Gemini 모델을 지정할 수 있습니다. [RAGAS Faithfulness](https://docs.ragas.io/en/v0.3.9/concepts/metrics/available_metrics/faithfulness/) · [RAGAS Context Precision](https://docs.ragas.io/en/v0.3.9/concepts/metrics/available_metrics/context_precision/)
 
 ```powershell
 .\.venv\Scripts\python.exe -X utf8 scripts/eval_ragas.py --dry-run --format markdown

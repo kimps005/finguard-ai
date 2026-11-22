@@ -360,7 +360,7 @@ export default function Dashboard() {
                 {warnings.length > 0 && (
                   <div className="warning" role="alert">
                     <CircleAlert size={18} />
-                    <div><strong>검증을 통과하지 못한 분석을 제외했습니다.</strong>
+                    <div><strong>진단 리포트 안내</strong>
                       <ul>{warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>
                     </div>
                   </div>

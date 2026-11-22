@@ -3,7 +3,7 @@
 import argparse
 import asyncio
 from collections import Counter
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from datetime import date, timedelta
 from decimal import Decimal
 import json
@@ -13,17 +13,16 @@ from pathlib import Path
 import re
 import sys
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import httpx
 import psycopg
 from psycopg import sql
 
-from backend import dart_rag, stock_analysis
+from backend import dart_rag, llm, stock_analysis
 from backend.broker import Balance, DailyBar, FiveDayFlow, Holding, InvestorFlow
 from backend.dart_etl import INSERT_CHUNK
 from backend.finance_calc import ANNUAL, THIRD, LockupRelease, calculate_scorecard, simulate_purchase
@@ -72,7 +71,7 @@ def load_dataset(path):
     return dataset
 
 
-def scenario(case, http):
+def scenario(case):
     """Inject a fixed account and market snapshot while running the production graph."""
     values = {key: Decimal(value) for key, value in case["account"].items()}
     code, corp, name = case["stock_code"], case["corp_code"], case["issuer"]
@@ -116,7 +115,7 @@ def scenario(case, http):
         return []
 
     market = SimpleNamespace(collect=collect, orderable_cash=orderable_cash,
-                             broker=SimpleNamespace(http=http), external=SimpleNamespace(get_news=get_news))
+                             external=SimpleNamespace(get_news=get_news))
     card = calculate_scorecard(stock, holding, flow, as_of=AS_OF, reports=reports, bars=bars,
                                releases=releases, overhang_events=events)
     purchase = simulate_purchase(holding, balance, cash, amount=budget)
@@ -162,15 +161,15 @@ def grade_numbers(report, stock_code, expected):
     return checks
 
 
-async def run_case(case, http, *, dry_run):
-    graph, query, expected = scenario(case, http)
+async def run_case(case, *, dry_run):
+    graph, query, expected = scenario(case)
     production_analyze = stock_analysis.analyze
     context = {}
 
-    async def capture(client, prompt):
+    async def capture(prompt):
         context.update(json.loads(prompt))
         if not dry_run:
-            return await production_analyze(client, prompt)
+            return await production_analyze(prompt)
         relevant = {doc["text"] for doc in case["documents"] if doc["relevant"]}
         matched = [doc for doc in context["disclosures"] if doc["text"] in relevant]
         return {"analysis_text": " ".join(
@@ -179,7 +178,9 @@ async def run_case(case, http, *, dry_run):
 
     tokens = []
     done = None
-    with patch.object(stock_analysis, "analyze", capture):
+    # Exercise local fallback without using any configured cloud credentials in a dry run.
+    offline = patch.object(llm, "invoke", AsyncMock(side_effect=llm.LLMUnavailable)) if dry_run else nullcontext()
+    with offline, patch.object(stock_analysis, "analyze", capture):
         async for frame in chat_events(graph, query):
             event, data, *_ = frame.splitlines()
             payload = json.loads(data.removeprefix("data: "))
@@ -197,7 +198,7 @@ async def run_case(case, http, *, dry_run):
     return context, answer, grade_numbers(report, case["stock_code"], expected)
 
 
-async def dry_retrieval(case, http):
+async def dry_retrieval(case):
     rows = [{"rcept_no": doc["rcept_no"], "report_nm": doc["title"], "chunk_text": doc["text"]}
             for doc in case["documents"]]
 
@@ -207,7 +208,7 @@ async def dry_retrieval(case, http):
         return rows
 
     with patch.object(dart_rag, "search", search):
-        context, answer, checks = await run_case(case, http, dry_run=True)
+        context, answer, checks = await run_case(case, dry_run=True)
     return context, answer, checks
 
 
@@ -255,36 +256,33 @@ async def indexed_corpus(cases):
 
 
 async def evaluate(dataset, *, dry_run, judge_model):
-    async with httpx.AsyncClient() as http:
-        results = []
-        if dry_run:
-            for case in dataset["cases"]:
-                context, answer, checks = await dry_retrieval(case, http)
-                results.append(case_result(case, *dry_scores(case, context, answer), checks))
-            return summarize(dataset, results, "dry-run")
+    results = []
+    if dry_run:
+        for case in dataset["cases"]:
+            context, answer, checks = await dry_retrieval(case)
+            results.append(case_result(case, *dry_scores(case, context, answer), checks))
+        return summarize(dataset, results, "dry-run")
 
-        from openai import AsyncOpenAI
-        from ragas.llms import llm_factory
-        from ragas.metrics.collections import ContextPrecision, Faithfulness
+    from ragas.dataset_schema import SingleTurnSample
+    from ragas.llms import LangchainLLMWrapper
+    from ragas.metrics import Faithfulness, LLMContextPrecisionWithReference
 
-        async with AsyncOpenAI(
-            api_key=os.environ["GEMINI_API_KEY"],
-            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-        ) as judge, indexed_corpus(dataset["cases"]):
-            llm = llm_factory(judge_model, client=judge)
-            faithful = Faithfulness(llm=llm)
-            precision = ContextPrecision(llm=llm)
-            for case in dataset["cases"]:
-                context, answer, checks = await run_case(case, http, dry_run=False)
-                disclosures = [f"{doc['title']}\n{doc['text']}" for doc in context["disclosures"]]
-                inputs = {k: context[k] for k in ("holding", "scorecard", "macro", "overhang", "news")}
-                f = await faithful.ascore(user_input=context["question"], response=answer,
-                                         retrieved_contexts=[*disclosures, stock_analysis.dump(inputs)]) if answer else None
-                p = await precision.ascore(user_input=case["question"], reference=case["reference"],
-                                          retrieved_contexts=disclosures) if disclosures else None
-                results.append(case_result(case, f.value if f else 0.0, p.value if p else 0.0, checks))
-        return {**summarize(dataset, results, "live"), "judge_model": judge_model,
-                "answer_model": stock_analysis.gemini_model()}
+    judge = LangchainLLMWrapper(llm.gemini(judge_model), bypass_n=True)
+    faithful = Faithfulness(llm=judge)
+    precision = LLMContextPrecisionWithReference(llm=judge)
+    async with indexed_corpus(dataset["cases"]):
+        for case in dataset["cases"]:
+            context, answer, checks = await run_case(case, dry_run=False)
+            disclosures = [f"{doc['title']}\n{doc['text']}" for doc in context["disclosures"]]
+            indicators = {k: v for k, v in context.items() if k != "disclosures"}
+            sample = SingleTurnSample(user_input=case["question"], response=answer, reference=case["reference"],
+                                      retrieved_contexts=disclosures)
+            f = await faithful.single_turn_ascore(sample.model_copy(update={
+                "retrieved_contexts": [*disclosures, stock_analysis.dump(indicators)]})) if answer else 0.0
+            p = await precision.single_turn_ascore(sample) if disclosures else 0.0
+            results.append(case_result(case, f, p, checks))
+    return {**summarize(dataset, results, "live"), "judge_model": judge_model,
+            "primary_worker_model": llm.model_name("worker")}
 
 
 def case_result(case, faithfulness, precision, checks):
@@ -320,7 +318,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, default=DATASET)
     parser.add_argument("--dry-run", action="store_true", help="Use offline fixture retrieval and scoring")
-    parser.add_argument("--judge-model", default=os.getenv("RAGAS_JUDGE_MODEL") or stock_analysis.gemini_model())
+    parser.add_argument("--judge-model", default=llm.model_name("synthesizer"))
     parser.add_argument("--format", choices=("json", "markdown"), default="json")
     args = parser.parse_args()
     if not args.dry_run and not os.getenv("GEMINI_API_KEY", "").strip():
