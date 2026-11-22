@@ -14,6 +14,13 @@ const tossSettings = new Map([
   ["toss_access_denied", "토스증권이 계좌 조회를 거절했습니다. API 키와 계좌 조회 권한을 확인해 주세요."],
 ]);
 
+export function HEAD(request: Request): Response {
+  return new Response(null, {
+    status: hasValidPin(request) ? 204 : 401,
+    headers: { "Cache-Control": "no-store" },
+  });
+}
+
 export async function GET(request: Request): Promise<Response> {
   if (!hasValidPin(request)) return privateResponse("Unauthorized", 401);
 

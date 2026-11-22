@@ -31,8 +31,8 @@ KST = timezone(timedelta(hours=9))
 
 UPSERT = """
 INSERT INTO stock_master
-    (stock_code, corp_code, isin_cd, crno, corp_name, asset_type, induty_code, listed_shares)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    (stock_code, corp_code, isin_cd, crno, corp_name, asset_type, induty_code, listed_shares, market)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT (stock_code) DO UPDATE SET
     corp_code = EXCLUDED.corp_code,
     isin_cd = EXCLUDED.isin_cd,
@@ -41,13 +41,15 @@ ON CONFLICT (stock_code) DO UPDATE SET
     asset_type = EXCLUDED.asset_type,
     induty_code = EXCLUDED.induty_code,
     listed_shares = EXCLUDED.listed_shares,
+    market = COALESCE(EXCLUDED.market, stock_master.market),
     updated_at = CURRENT_TIMESTAMP
 WHERE (stock_master.corp_code, stock_master.isin_cd, stock_master.crno,
        stock_master.corp_name, stock_master.asset_type,
-       stock_master.induty_code, stock_master.listed_shares)
+       stock_master.induty_code, stock_master.listed_shares, stock_master.market)
 IS DISTINCT FROM
       (EXCLUDED.corp_code, EXCLUDED.isin_cd, EXCLUDED.crno,
-       EXCLUDED.corp_name, EXCLUDED.asset_type, EXCLUDED.induty_code, EXCLUDED.listed_shares)
+       EXCLUDED.corp_name, EXCLUDED.asset_type, EXCLUDED.induty_code, EXCLUDED.listed_shares,
+       COALESCE(EXCLUDED.market, stock_master.market))
 """
 
 
@@ -65,6 +67,7 @@ class Stock:
     asset_type: str
     induty_code: str | None
     listed_shares: Decimal
+    market: str | None = None
 
 
 def download(url: str, params: dict) -> bytes:
@@ -186,6 +189,7 @@ def build_stock_master(
                 code, corp_code, isin, crno, name, resolved_type,
                 (listing.get("indutyCode") or "").strip() or None,
                 listed_shares(quote.get(shares_field), isin),
+                (quote.get("mrktCtg") or listing.get("mrktCtg") or "").strip() or None,
             )
 
     # DART supplies the issuer's listed code. Direct matches can seed the link
@@ -238,7 +242,7 @@ def sync(base_date: date | None, dart_key: str, fsc_key: str) -> tuple[date, int
         with psycopg.connect() as connection, connection.cursor() as cursor:
             cursor.executemany(UPSERT, [
                 (stock.stock_code, stock.corp_code, stock.isin_cd, stock.crno,
-                 stock.corp_name, stock.asset_type, stock.induty_code, int(stock.listed_shares))
+                 stock.corp_name, stock.asset_type, stock.induty_code, int(stock.listed_shares), stock.market)
                 for stock in stocks
             ])
         return day, len(stocks)

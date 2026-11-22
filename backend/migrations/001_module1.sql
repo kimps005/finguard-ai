@@ -8,6 +8,7 @@ CREATE TABLE stock_master (
     isin_cd VARCHAR(12) NOT NULL,
     crno VARCHAR(13),
     corp_name VARCHAR(100) NOT NULL,
+    market VARCHAR(32),
     asset_type VARCHAR(10) NOT NULL DEFAULT 'STOCK',
     induty_code VARCHAR(10),
     listed_shares BIGINT NOT NULL,

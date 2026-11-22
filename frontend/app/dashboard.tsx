@@ -8,7 +8,7 @@ import {
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { readChatEvents, type AccountSnapshot, type DecimalString, type Scorecards, type Status } from "../lib/chat-stream";
-import PriceOutlook, { PRICE_OUTLOOK_KEY } from "./price-outlook";
+import PriceOutlook from "./price-outlook";
 
 const PIN_KEY = "finguard-app-pin";
 const PIN_HEADER = "X-App-Pin";
@@ -135,12 +135,12 @@ export default function Dashboard() {
   const [checking, setChecking] = useState(true);
   const [accessError, setAccessError] = useState("");
   const [account, setAccount] = useState<AccountSnapshot | null>(null);
+  const [accountError, setAccountError] = useState("");
   const [scores, setScores] = useState<Scorecards>({});
   const [simulationCode, setSimulationCode] = useState("");
   const [query, setQuery] = useState("");
   const [topic, setTopic] = useState("");
   const [running, setRunning] = useState(false);
-  const [automaticRunning, setAutomaticRunning] = useState(false);
   const [elapsed, setElapsed] = useState<number | null>(null);
   const [statuses, setStatuses] = useState<Record<string, Status>>({});
   const [report, setReport] = useState("");
@@ -163,10 +163,10 @@ export default function Dashboard() {
     requestRef.current?.abort();
     requestRef.current = null;
     sessionStorage.removeItem(PIN_KEY);
-    sessionStorage.removeItem(PRICE_OUTLOOK_KEY);
     setPin("");
     setPinInput("");
     setAccount(null);
+    setAccountError("");
     setScores({});
     setSimulationCode("");
     setQuery("");
@@ -178,33 +178,54 @@ export default function Dashboard() {
     setAccessError(message);
     setChecking(false);
     setRunning(false);
-    setAutomaticRunning(false);
     setElapsed(null);
   }, []);
+
+  useEffect(() => {
+    if (!pin) return;
+    const controller = new AbortController();
+    async function loadAccount() {
+      try {
+        const response = await fetch("/api/account", { headers: { [PIN_HEADER]: pin }, signal: controller.signal });
+        if (response.status === 401) {
+          lock("접근이 만료되었습니다. PIN을 다시 입력해 주세요.");
+          return;
+        }
+        if (!response.ok) {
+          const problem = await response.json().catch(() => null);
+          throw new Error(typeof problem?.message === "string" ? problem.message : "계좌 정보를 불러올 수 없습니다.");
+        }
+        const snapshot: AccountSnapshot = await response.json();
+        if (!controller.signal.aborted) setAccount((current) => current ? {
+          ...current,
+          account_summary: { ...current.account_summary, orderable_cash: snapshot.account_summary.orderable_cash },
+        } : snapshot);
+      } catch (error) {
+        if (!controller.signal.aborted) setAccountError(
+          error instanceof Error ? error.message : "계좌 정보를 불러올 수 없습니다.");
+      }
+    }
+    void loadAccount();
+    return () => controller.abort();
+  }, [lock, pin]);
 
   async function unlock(candidate: string, signal: AbortSignal) {
     setChecking(true);
     setAccessError("");
     try {
-      const response = await fetch("/api/account", { headers: { [PIN_HEADER]: candidate }, signal });
+      const response = await fetch("/api/account", { method: "HEAD", headers: { [PIN_HEADER]: candidate }, signal });
+      if (signal.aborted) return;
       if (response.status === 401) {
         lock("접근 PIN을 확인해 주세요.");
         return;
       }
-      if (!response.ok) {
-        const problem = await response.json().catch(() => null);
-        throw new Error(typeof problem?.message === "string" && problem.message
-          ? problem.message
-          : "계좌 정보를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.");
-      }
-      const snapshot: AccountSnapshot = await response.json();
+      if (!response.ok) throw new Error("접근을 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.");
       sessionStorage.setItem(PIN_KEY, candidate);
-      setAccount(snapshot);
       setPin(candidate);
       setPinInput("");
     } catch (error) {
       if (!signal.aborted) {
-        setAccessError(error instanceof Error ? error.message : "계좌 서버에 연결할 수 없습니다.");
+        setAccessError(error instanceof Error ? error.message : "대시보드에 연결할 수 없습니다.");
       }
     } finally {
       if (!signal.aborted) setChecking(false);
@@ -223,7 +244,7 @@ export default function Dashboard() {
 
   async function analyze(value: string, label = questionTopic(value, account?.holdings ?? [])) {
     const question = value.trim();
-    if (!pin || !question || automaticRunning || requestRef.current) return;
+    if (!pin || !question || requestRef.current) return;
     const controller = new AbortController();
     const startedAt = performance.now();
     requestRef.current = controller;
@@ -266,6 +287,7 @@ export default function Dashboard() {
           const result = item.data;
           if (!result.ok || !("final_report" in result)) throw new Error("계좌 분석을 완료할 수 없습니다.");
           setReport(result.final_report);
+          setAccountError("");
           setWarnings(result.guardrail_warnings);
           setAccount((current) => ({
             holdings: result.holdings,
@@ -298,7 +320,7 @@ export default function Dashboard() {
     ? holdingReturn(accountReturn as DecimalString)
     : null;
   const holdingOptions = account?.holdings ?? [];
-  const questionDisabled = running || automaticRunning;
+  const questionDisabled = running;
   const simulationHolding = holdingOptions.find((holding) => holding.stock_code === simulationCode)
     ?? holdingOptions.find((holding) => holding.profit_loss_pct.startsWith("-"))
     ?? holdingOptions[0];
@@ -314,12 +336,12 @@ export default function Dashboard() {
           {pin && <button className="lock-button" onClick={() => lock()}><LockKeyhole size={15} /> 잠그기</button>}
         </div>
       </header>
-      {!pin || !account || !summary ? (
+      {!pin ? (
         <main className="lock-page">
           <form className="panel lock-panel" onSubmit={submitPin}>
             <span className="section-icon"><LockKeyhole size={23} /></span>
             <h1>대시보드 잠금 해제</h1>
-            <p className="muted">계좌를 조회하려면 접근 PIN을 입력하세요.</p>
+            <p className="muted">대시보드를 열려면 접근 PIN을 입력하세요.</p>
             <label htmlFor="pin">접근 PIN</label>
             <input id="pin" type="password" value={pinInput} onChange={(event) => setPinInput(event.target.value)}
               placeholder="PIN 입력" autoComplete="off" maxLength={128} required />
@@ -331,13 +353,10 @@ export default function Dashboard() {
         </main>
       ) : (
         <main className="shell dashboard">
-          <div className="page-heading">
-            <h1>내 포트폴리오</h1>
-          </div>
-          <PriceOutlook pin={pin} pinHeader={PIN_HEADER} manualRunning={running}
-            onBusyChange={setAutomaticRunning} onUnauthorized={lock} />
-          <div className="dashboard-grid">
-            <aside className="min-w-0 space-y-5" aria-label="계좌와 보유 종목">
+          <PriceOutlook pin={pin} pinHeader={PIN_HEADER} holdings={holdingOptions} onUnauthorized={lock} />
+          {accountError && <p className="outlook-note mb-4" role="status">{accountError}</p>}
+          <div className={summary ? "dashboard-grid" : undefined}>
+            {summary && <aside className="min-w-0 space-y-5" aria-label="계좌와 보유 종목">
               <section className="panel account-panel" aria-labelledby="account-title">
                 <h2 id="account-title"><Wallet size={17} /> 계좌 요약</h2>
                 <dl>
@@ -392,7 +411,7 @@ export default function Dashboard() {
                   </ul>
                 )}
               </section>
-            </aside>
+            </aside>}
             <div className="min-w-0 space-y-5">
               <section className="panel analysis-panel" aria-labelledby="diagnosis-title">
                 <div className="section-heading"><h2 id="diagnosis-title"><Activity size={19} /> 직접 질문하기</h2></div>

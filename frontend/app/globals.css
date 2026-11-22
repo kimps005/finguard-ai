@@ -41,7 +41,6 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .lock-button:hover { background: var(--canvas); color: var(--ink); }
 
 .dashboard { padding-block: 40px 64px; }
-.page-heading { margin-bottom: 22px; }
 h1 { font-size: clamp(26px, 4vw, 36px); font-weight: 780; letter-spacing: -.06em; line-height: 1.25; }
 .dashboard-grid { display: grid; grid-template-columns: minmax(275px, 1fr) minmax(0, 2fr); gap: 20px; align-items: start; }
 .panel { background: var(--surface); border-radius: 20px; }
@@ -76,13 +75,28 @@ h1 { font-size: clamp(26px, 4vw, 36px); font-weight: 780; letter-spacing: -.06em
 .empty-holdings { padding: 0 24px 24px; font-size: 14px; }
 
 .price-outlook { margin-bottom: 24px; }
+.stock-search { position: relative; z-index: 1; display: flex; align-items: center; gap: 12px; min-height: 60px; padding: 8px 12px 8px 18px; border: 1px solid var(--border); border-radius: 17px; background: var(--surface); color: var(--blue); }
+.stock-search:focus-within { border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-tint); }
+.stock-search > svg { flex: none; }
+.stock-search input { min-width: 0; flex: 1; outline: none; background: transparent; color: var(--ink); }
+.stock-search input::placeholder { color: var(--body); font-size: clamp(12px, 2vw, 16px); }
+.stock-search > button { border-radius: 9px; background: var(--blue-tint); padding: 7px 12px; color: #1b64c9; font-size: 14px; font-weight: 750; white-space: nowrap; }
+.stock-suggestions { position: absolute; inset: calc(100% + 5px) 0 auto; max-height: 300px; overflow-y: auto; padding: 5px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); box-shadow: 0 10px 25px #191f2818; }
+.stock-suggestions button { display: flex; width: 100%; align-items: baseline; justify-content: space-between; gap: 12px; padding: 9px 12px; border-radius: 9px; color: var(--ink); text-align: left; }
+.stock-suggestions button:hover, .stock-suggestions button[aria-selected="true"] { background: var(--blue-tint); }
+.stock-suggestions button span { color: var(--body); font-size: 13px; white-space: nowrap; }
+.stock-chips, .stock-chips > div { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.stock-chips { gap: 8px 18px; margin-block: 12px 24px; color: var(--body); font-size: 13px; }
+.stock-chips button { padding: 5px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); font-weight: 700; }
+.stock-chips button:hover, .stock-chips button[aria-pressed="true"] { border-color: #b5d6ff; background: var(--blue-tint); color: #1b64c9; }
 .outlook-heading, .outlook-meta { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
-.outlook-heading h2 { font-size: clamp(19px, 3vw, 25px); font-weight: 780; }
+.outlook-heading h1 span { color: var(--body); font-size: .55em; font-weight: 650; white-space: nowrap; letter-spacing: 0; }
+.outlook-kicker { margin-bottom: 3px; color: var(--body); font-size: 13px; font-weight: 700; }
+.outlook-quote { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 5px; font-size: clamp(20px, 3vw, 27px); }
 .outlook-refresh { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; border-radius: 12px; padding: 8px 14px; background: var(--blue-tint); color: #1b64c9; font-size: 14px; font-weight: 750; }
 .outlook-refresh:hover:not(:disabled) { background: #d9ebff; }
 .outlook-progress { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 13px 16px; border-radius: 14px; background: var(--blue-tint); color: #1b64c9; font-size: 14px; font-weight: 700; }
 .outlook-meta { margin-top: 12px; font-size: 14px; }
-.outlook-meta select { max-width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px; background: white; font-weight: 700; }
 .outlook-meta time, .outlook-note { color: var(--body); font-size: 13px; }
 .outlook-note { margin-top: 10px; }
 .outlook-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
@@ -91,6 +105,7 @@ h1 { font-size: clamp(26px, 4vw, 36px); font-weight: 780; letter-spacing: -.06em
 .outlook-card[data-level="ceiling"] { --accent: #f59e0b; --tint: var(--red-tint); --label: #a13624; }
 .outlook-card-label { display: inline-block; padding: 3px 8px; border-radius: 7px; color: var(--label); background: var(--tint); font-size: 12px; font-weight: 750; }
 .outlook-card h3 { margin-top: 9px; font-size: clamp(15px, 2.3vw, 20px); font-weight: 780; }
+.outlook-instruction { margin-top: 3px; color: var(--body); font-size: 13px; font-weight: 650; }
 .outlook-price { margin-top: 6px; font-size: clamp(25px, 3.4vw, 43px); line-height: 1.2; font-weight: 800; letter-spacing: -.05em; }
 .outlook-price span { margin-left: 3px; font-size: .52em; font-weight: 700; }
 .outlook-returns { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; color: var(--label); font-size: 13px; font-weight: 700; }
@@ -102,7 +117,7 @@ h1 { font-size: clamp(26px, 4vw, 36px); font-weight: 780; letter-spacing: -.06em
 .outlook-marker { position: absolute; top: 50%; width: 15px; height: 15px; transform: translate(-50%, -50%); border-radius: 50%; border: 2px solid white; background: var(--ink); box-shadow: 0 0 0 1px var(--ink); }
 .outlook-endpoints { display: flex; justify-content: space-between; gap: 10px; }
 .outlook-endpoints span:last-child { text-align: right; }
-.outlook-evidence summary { width: fit-content; cursor: pointer; color: var(--ink); font-weight: 750; }
+.outlook-evidence h3 { color: var(--ink); font-weight: 750; }
 .outlook-evidence ul { display: grid; gap: 4px; margin-top: 9px; padding-left: 17px; list-style: disc; }
 .outlook-evidence a { margin-left: 7px; color: #1b64c9; text-decoration: underline; overflow-wrap: anywhere; }
 

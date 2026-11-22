@@ -100,6 +100,7 @@ class Quote:
     current_price: Decimal
     source: str
     session: date | None = None
+    change_pct: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -402,15 +403,26 @@ class BrokerConnector:
 
         async def primary():
             body = await self._market("inquire-price", "FHKST01010100", kis_code)
-            return Quote(code, number(body["output"]["stck_prpr"]), "kis")
+            output = body["output"]
+            try:
+                change = number(output["prdy_ctrt"])
+            except (KeyError, ValueError, DecimalException):
+                change = None
+            price = number(output["stck_prpr"])
+            if price <= 0:
+                raise BrokerError("KIS returned no positive price")
+            return Quote(code, price, "kis", change_pct=change)
 
         def fallback():
             end = self.clock().astimezone(KST).date()
-            bars = self.market_data.daily(code, end - timedelta(days=14), end, asset_type)
+            bars = sorted((bar for bar in self.market_data.daily(
+                code, end - timedelta(days=14), end, asset_type) if bar.close > 0),
+                key=lambda bar: bar.session)
             if not bars:
                 raise BrokerError("PyKRX returned no price")
-            latest = max(bars, key=lambda bar: bar.session)
-            return Quote(code, latest.close, "pykrx", latest.session)
+            latest = bars[-1]
+            change = (latest.close - bars[-2].close) * 100 / bars[-2].close if len(bars) > 1 else None
+            return Quote(code, latest.close, "pykrx", latest.session, change)
 
         return await self._with_fallback(primary, fallback)
 

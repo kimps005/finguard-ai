@@ -3,7 +3,7 @@ import logging
 import os
 from typing import Annotated, Literal
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
@@ -11,8 +11,8 @@ from backend.broker import BrokerConfigurationError, BrokerConnector, BrokerErro
 from backend.connectors import ExternalConnectors
 from backend.dart_etl import DartETL
 from backend.portfolio_graph import account_view, build_graph
-from backend.portfolio_market import MarketData
-from backend.price_bands import price_band_updates
+from backend.portfolio_market import MarketData, search_stocks
+from backend.price_bands import StockPriceUnavailable, price_band_updates, stock_price_band_updates
 from backend.stock_analysis import dump
 from backend.toss_broker import TossBrokerConnector, TossSettings
 
@@ -37,7 +37,10 @@ async def lifespan(app: FastAPI):
         app.state.external_connectors = ExternalConnectors.from_env(broker.http, broker.redis)
         app.state.market = MarketData(broker, app.state.dart_etl, app.state.external_connectors)
         app.state.graph = build_graph(app.state.market)
-        yield
+        try:
+            yield
+        finally:
+            await app.state.dart_etl.close()
 
 
 app = FastAPI(title="FinGuard AI", lifespan=lifespan)
@@ -74,6 +77,15 @@ async def account_snapshot(request: Request):
     return Response(dump(snapshot), media_type="application/json", headers={"Cache-Control": "no-store"})
 
 
+@app.get("/api/v1/stocks/search")
+async def stock_search(q: Annotated[str, Query(min_length=1, max_length=100)]):
+    try:
+        return await search_stocks(q.strip())
+    except Exception as exc:
+        logger.warning("Stock search failed (%s)", type(exc).__name__)
+        return JSONResponse({"message": "종목 검색을 완료할 수 없습니다."}, status_code=503)
+
+
 class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     user_query: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
@@ -82,6 +94,8 @@ class ChatRequest(BaseModel):
 class PriceBandRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mode: Literal["price_bands"]
+    target_stock_code: Annotated[str, StringConstraints(
+        strip_whitespace=True, pattern=r"^[0-9A-Za-z]{6}$")] | None = None
 
 
 def sse(event, data):
@@ -116,16 +130,21 @@ async def chat_events(graph, query):
         yield sse("done", {"ok": False})
 
 
-async def price_band_events(market):
+async def price_band_events(market, target_stock_code=None):
     yield sse("status", {"node": "market_data_node", "phase": "started"})
     try:
         preliminary = True
-        async for snapshot in price_band_updates(market):
+        updates = (stock_price_band_updates(market, target_stock_code.upper()) if target_stock_code
+                   else price_band_updates(market))
+        async for snapshot in updates:
             if preliminary:
                 yield sse("price_bands", snapshot)
                 preliminary = False
             else:
                 yield sse("done", {"ok": True, "mode": "price_bands", **snapshot})
+    except StockPriceUnavailable as exc:
+        yield sse("error", {"message": str(exc)})
+        yield sse("done", {"ok": False})
     except Exception as exc:
         logger.error("Short-term analysis stream failed (%s)", type(exc).__name__)
         yield sse("error", {"message": "1개월 타점 분석을 완료할 수 없습니다."})
@@ -134,7 +153,7 @@ async def price_band_events(market):
 
 @app.post("/api/v1/chat/stream", response_class=StreamingResponse)
 async def chat_stream(body: ChatRequest | PriceBandRequest, request: Request):
-    events = (price_band_events(request.app.state.market) if isinstance(body, PriceBandRequest)
+    events = (price_band_events(request.app.state.market, body.target_stock_code) if isinstance(body, PriceBandRequest)
               else chat_events(request.app.state.graph, body.user_query))
     return StreamingResponse(events, media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

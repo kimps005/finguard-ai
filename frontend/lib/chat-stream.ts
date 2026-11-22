@@ -76,12 +76,30 @@ export interface PriceBands {
   bands: PriceBand[];
 }
 
+export interface StockSearchResult {
+  stock_code: string;
+  corp_name: string;
+  market: string | null;
+}
+
+export type StockPriceBand = Omit<Extract<PriceBand, { levels: object }>, "average_price" | "levels"> & {
+  change_pct: DecimalString | null;
+  levels: Record<"buy_zone" | "sell_zone" | "peak_limit", PriceLevel & { current_pct: DecimalString }>;
+};
+
+export interface StockPriceBands {
+  as_of: string;
+  band: StockPriceBand;
+}
+
+type BandSnapshot = PriceBands | StockPriceBands;
+
 type ChatEvent =
   | { event: "status"; data: Status }
   | { event: "token"; data: { text: string } }
-  | { event: "price_bands"; data: PriceBands }
+  | { event: "price_bands"; data: BandSnapshot }
   | { event: "error"; data: { message: string } }
-  | { event: "done"; data: Diagnosis | (PriceBands & { ok: true; mode: "price_bands" }) | { ok: false } };
+  | { event: "done"; data: Diagnosis | (BandSnapshot & { ok: true; mode: "price_bands" }) | { ok: false } };
 
 export async function* readChatEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<ChatEvent> {
   const reader = body.getReader();

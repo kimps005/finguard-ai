@@ -1,0 +1,1 @@
+ALTER TABLE stock_master ADD COLUMN IF NOT EXISTS market VARCHAR(32);

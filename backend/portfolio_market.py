@@ -36,6 +36,24 @@ async def stock_master(codes: list[str]) -> dict[str, Stock]:
         return {row["stock_code"]: Stock(**row) for row in await cursor.fetchall()}
 
 
+async def search_stocks(query: str) -> list[dict]:
+    if not query:
+        return []
+    async with await psycopg.AsyncConnection.connect(row_factory=dict_row) as conn:
+        cursor = await conn.execute(
+            """SELECT stock_code, corp_name, market
+               FROM stock_master
+               WHERE stock_code = upper(%(q)s)
+                  OR strpos(lower(corp_name), lower(%(q)s)) > 0
+               ORDER BY CASE WHEN stock_code = upper(%(q)s) THEN 0
+                             WHEN lower(corp_name) = lower(%(q)s) THEN 1
+                             WHEN starts_with(lower(corp_name), lower(%(q)s)) THEN 2
+                             ELSE 3 END,
+                        length(corp_name), stock_code
+               LIMIT 8""", {"q": query})
+        return await cursor.fetchall()
+
+
 async def outstanding_events(corp_code: str, on: date) -> list[dict]:
     async with await psycopg.AsyncConnection.connect(row_factory=dict_row) as conn:
         cursor = await conn.execute(

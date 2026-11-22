@@ -7,6 +7,7 @@ from datetime import date
 from decimal import Decimal
 from io import BytesIO
 import json
+import logging
 from pathlib import Path
 import re
 from zipfile import ZipFile
@@ -43,6 +44,7 @@ INSERT INTO dart_chunks (corp_code, rcept_no, chunk_no, report_nm, rcept_dt,
 VALUES (%s, %s, %s, %s, %s, %s, %s::vector, to_tsvector('simple', %s))
 """
 LOCK_SECONDS = 600
+logger = logging.getLogger(__name__)
 
 
 def _optional(value):
@@ -106,6 +108,39 @@ class DartETL:
         self.redis = redis
         self.http = http
         self.api_key = api_key
+        self._pending_ingests: dict[str, asyncio.Task] = {}
+
+    async def has_recent_chunks(self, corp_code: str, start: date, end: date) -> bool:
+        async with await psycopg.AsyncConnection.connect() as conn:
+            cursor = await conn.execute(
+                "SELECT 1 FROM dart_chunks WHERE corp_code = %s AND rcept_dt BETWEEN %s AND %s LIMIT 1",
+                (corp_code, start, end))
+            return await cursor.fetchone() is not None
+
+    async def ingest_missing_stock(self, stock_code: str, corp_code: str, start: date, end: date):
+        if not self.api_key or await self.has_recent_chunks(corp_code, start, end):
+            return
+
+        async def ingest():
+            try:
+                async with asyncio.timeout(LOCK_SECONDS):
+                    await self.ingest_stock(stock_code, start, end)
+            except Exception as exc:
+                logger.warning("On-demand DART ingestion failed (%s)", type(exc).__name__)
+            finally:
+                self._pending_ingests.pop(corp_code, None)
+
+        task = self._pending_ingests.get(corp_code)
+        if task is None:
+            task = self._pending_ingests[corp_code] = asyncio.create_task(ingest())
+        # A short-lived SSE request can finish while the issuer continues indexing.
+        await asyncio.shield(task)
+
+    async def close(self):
+        tasks = tuple(self._pending_ingests.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _request(self, endpoint, **params):
         if not self.api_key:
@@ -206,9 +241,10 @@ class DartETL:
 
 
 def migrate():
-    sql = Path(__file__).with_name("migrations") / "004_module4.sql"
+    migrations = Path(__file__).with_name("migrations")
     with psycopg.connect(autocommit=True) as conn:
-        conn.execute(sql.read_text(encoding="utf-8"))
+        for name in ("004_module4.sql", "005_stock_market.sql"):
+            conn.execute((migrations / name).read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

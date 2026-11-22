@@ -10,12 +10,18 @@ from pydantic import BaseModel, Field
 
 from backend import dart_rag, llm
 from backend.broker import KST
+from backend.portfolio_market import stock_master
 from backend.stock_analysis import ALIAS, RECEIPT, Analysis, dump
 
 
 logger = logging.getLogger(__name__)
 DISCLOSURE_QUERY = "향후 1개월 주가에 영향을 주는 실적, 주요 계약, 증자, 전환사채, 보호예수 공시"
 LEVELS = ("buy", "sell", "ceiling")
+TARGET_LEVELS = dict(zip(LEVELS, ("buy_zone", "sell_zone", "peak_limit"), strict=True))
+
+
+class StockPriceUnavailable(RuntimeError):
+    pass
 
 
 class Reasons(BaseModel):
@@ -44,10 +50,9 @@ def pct(amount, base):
     return ((amount - base) * 100 / base).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-def calculate_band(holding, bars, flow):
-    current, average = holding.current_price, holding.average_price
-    result = {"stock_code": holding.stock_code, "name": holding.name,
-              "current_price": current, "average_price": average, "levels": None, "disclosures": []}
+def calculate_market_band(stock_code, name, current, bars, flow):
+    result = {"stock_code": stock_code, "name": name, "current_price": current,
+              "levels": None, "disclosures": []}
     if current <= 0:
         return result, None
 
@@ -85,20 +90,27 @@ def calculate_band(holding, bars, flow):
     position = max(Decimal(0), min(Decimal(100), (current - buy) * 100 / (sell - buy)))
     result.update(
         levels={"buy": {"price": buy, "reason": buy_reason, "current_pct": pct(buy, current)},
-                "sell": {"price": sell, "reason": sell_reason, "current_pct": pct(sell, current),
-                         "average_pct": pct(sell, average)},
-                "ceiling": {"price": ceiling, "reason": ceiling_reason}},
+                "sell": {"price": sell, "reason": sell_reason, "current_pct": pct(sell, current)},
+                "ceiling": {"price": ceiling, "reason": ceiling_reason, "current_pct": pct(ceiling, current)}},
         position_pct=position.quantize(Decimal("0.01")),
         indicative=indicative,
         ma20=ma20.quantize(Decimal(1), rounding=ROUND_HALF_UP) if ma20 is not None else None,
         recent_range={"sessions": count, "low": low, "high": high} if count else None,
         flow={"foreign": flow.foreign_net_buy, "institution": flow.institution_net_buy} if flow is not None else None,
     )
-    signals = {"name": holding.name, "weight_pct": holding.weight * 100,
-               "profit_loss_pct": pct(current, average),
-               "scores": {"ma20": int(current.compare(ma20)) if ma20 is not None else None,
+    signals = {"name": name, "scores": {"ma20": int(current.compare(ma20)) if ma20 is not None else None,
                           "foreign": int(flow.foreign_net_buy.compare(0)) if flow is not None else None,
                           "institution": int(flow.institution_net_buy.compare(0)) if flow is not None else None}}
+    return result, signals
+
+
+def calculate_band(holding, bars, flow):
+    result, signals = calculate_market_band(
+        holding.stock_code, holding.name, holding.current_price, bars, flow)
+    result["average_price"] = holding.average_price
+    if signals is not None:
+        result["levels"]["sell"]["average_pct"] = pct(result["levels"]["sell"]["price"], holding.average_price)
+        signals.update(weight_pct=holding.weight * 100, profit_loss_pct=pct(holding.current_price, holding.average_price))
     return result, signals
 
 
@@ -120,6 +132,56 @@ def enrich_band(band, reasons, references):
         band["levels"][key]["reason"] = reason
         cited.update((alias, references[alias]) for alias in aliases)
     band["disclosures"] = list(cited.values())
+
+
+async def stock_price_band_updates(market, stock_code):
+    stock = (await stock_master([stock_code])).get(stock_code)
+    if stock is None:
+        raise StockPriceUnavailable("등록된 종목을 찾을 수 없습니다.")
+
+    broker = market.broker
+    now = broker.clock().astimezone(KST)
+    end = now.date() - timedelta(days=now.time() < time(15, 40))
+    quote, bars, flow = await asyncio.gather(
+        optional_data(broker.get_quote(stock_code, asset_type=stock.asset_type), 10),
+        optional_data(broker.get_daily_bars(stock_code, end - timedelta(days=60), end,
+                                            asset_type=stock.asset_type), 10, default=()),
+        optional_data(broker.get_five_day_flow(stock_code, as_of=now, asset_type=stock.asset_type), 10),
+    )
+    closes = [bar for bar in bars if bar.close > 0]
+    if quote is not None and quote.current_price > 0:
+        current, change = quote.current_price, quote.change_pct
+        if change is None:
+            if quote.session is not None:
+                prior = next((bar for bar in reversed(closes) if bar.session < quote.session), None)
+            else:
+                prior = closes[-1] if closes and closes[-1].session < now.date() else (
+                    closes[-2] if len(closes) > 1 else None)
+            change = pct(current, prior.close) if prior else None
+    elif closes:
+        current = closes[-1].close
+        change = pct(current, closes[-2].close) if len(closes) > 1 else None
+    else:
+        raise StockPriceUnavailable("현재가와 최근 종가를 불러올 수 없습니다. 잠시 후 다시 분석해 주세요.")
+
+    band, signals = calculate_market_band(stock_code, stock.corp_name, current, bars, flow)
+    band["change_pct"] = change
+
+    def snapshot():
+        return {"as_of": now.isoformat(timespec="seconds"),
+                "band": {**band, "levels": {target: band["levels"][key].copy()
+                                           for key, target in TARGET_LEVELS.items()}}}
+
+    yield snapshot()
+    if stock.corp_code and stock.asset_type == "STOCK":
+        on = now.date()
+        start = on - timedelta(days=60)
+        await optional_data(market.etl.ingest_missing_stock(stock_code, stock.corp_code, start, on), 8)
+        if await optional_data(market.etl.has_recent_chunks(stock.corp_code, start, on), 3):
+            chunks = await optional_data(dart_rag.search(stock.corp_code, DISCLOSURE_QUERY,
+                                                         limit=3, since=start, until=on), 8, default=[])
+            await enrich_bands([(band, signals, chunks)])
+    yield snapshot()
 
 
 async def price_band_updates(market):
@@ -146,9 +208,14 @@ async def price_band_updates(market):
     disclosures = await asyncio.gather(*(recent_disclosures(market, holding, now.date())
                                          for holding in issuers.values()))
     by_issuer = dict(zip(issuers, disclosures, strict=True))
+    await enrich_bands([(band, signals, by_issuer.get(holding.corp_code, []))
+                        for holding, (band, signals) in zip(holdings, rows, strict=True)])
+    yield snapshot
+
+
+async def enrich_bands(rows):
     contexts, targets, aliases = [], [], {}
-    for holding, (band, signals) in zip(holdings, rows, strict=True):
-        chunks = by_issuer.get(holding.corp_code, [])
+    for band, signals, chunks in rows:
         if not chunks:
             continue
         documents, references = [], {}
@@ -165,9 +232,9 @@ async def price_band_updates(market):
     if contexts:
         answer = await optional_data(llm.invoke(
             "synthesizer",
-            "보유 종목의 향후 1개월 가격 밴드에 붙일 한국어 근거를 작성하라. buy는 저점 지지, "
-            "sell은 목표 고점에서 차익 실현, ceiling은 상단 저항에서 비중 축소를 판단하는 조건이다. "
-            "가격은 로컬 엔진이 현재가·20일선·최근 변동폭으로 산출하고 평단가와 비교한다. "
+            "종목의 향후 1개월 가격 밴드에 붙일 한국어 근거를 작성하라. buy는 저점 지지, "
+            "sell은 목표 고점에서 차익 실현, ceiling은 상단 저항을 판단하는 조건이다. "
+            "가격은 로컬 엔진이 현재가·20일선·최근 변동폭으로 산출한다. "
             "가격과 수량을 추정하지 마라. ma20 점수는 현재가의 20일선 대비 위치, foreign과 institution은 "
             "최근 5거래일 순매수 방향이며 -1은 아래 또는 순매도, 0은 동일 또는 중립, 1은 위 또는 순매수다. "
             "입력 순서와 name을 유지하라. 각 이유는 관련 공시가 있을 때만 [DOC-N]을 붙여 한 문장으로 쓰고, "
@@ -179,4 +246,3 @@ async def price_band_updates(market):
             for (band, references), reasons in zip(targets, answer.reasons, strict=True):
                 if reasons.name == band["name"]:
                     enrich_band(band, reasons, references)
-    yield snapshot
