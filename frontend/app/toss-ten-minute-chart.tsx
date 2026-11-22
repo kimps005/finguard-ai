@@ -43,8 +43,9 @@ export default function TossTenMinuteChart({ stockCode, band, pin, pinHeader, on
   const peak = band?.levels.peak_limit.price;
 
   useEffect(() => {
-    if (!container.current) return;
-    const instance = createChart(container.current, {
+    const element = container.current;
+    if (!element) return;
+    const instance = createChart(element, {
       autoSize: true,
       layout: { background: { type: ColorType.Solid, color: "#FFFFFF" }, textColor: "#8B95A1",
         fontFamily: "Arial, sans-serif", fontSize: 12, attributionLogo: true },
@@ -60,7 +61,22 @@ export default function TossTenMinuteChart({ stockCode, band, pin, pinHeader, on
       priceFormat: { type: "custom", minMove: 0.01, formatter: (price: number) => `${won.format(price)}원` },
     });
     instance.subscribeCrosshairMove(({ time }) => setHoveredTime(typeof time === "number" ? time : undefined));
+    const timeScale = instance.timeScale();
+    function scrollHistory(event: WheelEvent) {
+      if (event.ctrlKey || event.metaKey || !event.deltaY || Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return;
+      const range = timeScale.getVisibleLogicalRange();
+      const width = timeScale.width();
+      if (!range || !width) return;
+      const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? width : 1;
+      const position = timeScale.scrollPosition();
+      const bars = event.deltaY * unit * (range.to - range.from) / width;
+      timeScale.scrollToPosition(position - bars, false);
+      event.stopPropagation();
+      if (timeScale.scrollPosition() !== position) event.preventDefault();
+    }
+    element.addEventListener("wheel", scrollHistory, { capture: true, passive: false });
     return () => {
+      element.removeEventListener("wheel", scrollHistory, true);
       instance.remove();
       chart.current = null;
       series.current = null;
