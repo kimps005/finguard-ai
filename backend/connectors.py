@@ -209,7 +209,8 @@ class ExternalConnectors:
                          "dilution_pct": dilution, "releases": releases, "dart_receipts": receipts}
 
     async def get_news(self, corp_name: str, *, limit: int = 10) -> list[dict]:
-        if not self.naver_id or not self.naver_secret or not corp_name.strip():
+        corp_name = corp_name.strip()
+        if not self.naver_id or not self.naver_secret or not corp_name:
             return []
         if self.naver_api_hub:
             url = NAVER_HUB_URL
@@ -233,11 +234,13 @@ class ExternalConnectors:
         for row in items:
             try:
                 title = _news_text(row["title"])
+                if corp_name.casefold() not in title.casefold():
+                    continue
                 summary = _news_text(row["description"])
                 original = urldefrag(html.unescape(row.get("originallink") or "").strip()).url
                 link = urldefrag(html.unescape(row.get("link") or "").strip()).url
                 published = parsedate_to_datetime(row["pubDate"])
-                if title and (original or link) and published.utcoffset() is not None:
+                if (original or link) and published.utcoffset() is not None:
                     articles.append({"title": title, "description": summary, "link": original or link,
                                      "naver_link": link, "published_at": published.astimezone(KST)})
             except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
