@@ -20,7 +20,20 @@ const intervals = [["10m", "10분봉"], ["1d", "1일봉"], ["1w", "주봉"], ["1
 
 type Interval = typeof intervals[number][0];
 type Candle = CandlestickData<UTCTimestamp>;
-type CandlePayload = { time: number | string; open: string; high: string; low: string; close: string };
+type CandlePayload = Pick<Candle, "open" | "high" | "low" | "close"> | Record<"open" | "high" | "low" | "close", string>;
+
+function normalizeCandles(rows: (CandlePayload & { time: number | string })[]) {
+  const candles = new Map<number, Candle>();
+  for (const row of rows) {
+    const time = typeof row.time === "number" ? row.time : Date.parse(row.time) / 1000;
+    const [open, high, low, close] = [row.open, row.high, row.low, row.close].map(Number);
+    if (Number.isSafeInteger(time) && Math.abs(time) <= 8.64e12 &&
+        [open, high, low, close].every((price) => Number.isFinite(price) && price > 0)) {
+      candles.set(time, { time: time as UTCTimestamp, open, high, low, close });
+    }
+  }
+  return [...candles.values()].sort((left, right) => left.time - right.time);
+}
 
 export default function TossTenMinuteChart({ stockCode, band, pin, pinHeader, onUnauthorized }: {
   stockCode: string;
@@ -36,6 +49,7 @@ export default function TossTenMinuteChart({ stockCode, band, pin, pinHeader, on
   const [candles, setCandles] = useState<Candle[]>([]);
   const [hoveredTime, setHoveredTime] = useState<number>();
   const [failed, setFailed] = useState(false);
+  const [dailyFallback, setDailyFallback] = useState(false);
   const latest = candles.at(-1);
   const hovered = candles.find((candle) => candle.time === hoveredTime) ?? latest;
   const buy = band?.levels.buy_zone.price;
@@ -94,7 +108,7 @@ export default function TossTenMinuteChart({ stockCode, band, pin, pinHeader, on
     candleSeries.applyOptions({
       autoscaleInfoProvider: (base: () => AutoscaleInfo | null) => {
         const info = base();
-        if (!info?.priceRange || !levels.length || interval === "1w" || interval === "1y") return info;
+        if (!info?.priceRange || !levels.length) return info;
         const prices = levels.map(({ price }) => price);
         return { ...info, priceRange: {
           minValue: Math.min(info.priceRange.minValue, ...prices),
@@ -108,7 +122,7 @@ export default function TossTenMinuteChart({ stockCode, band, pin, pinHeader, on
     return () => {
       if (series.current === candleSeries) lines.forEach((line) => candleSeries.removePriceLine(line));
     };
-  }, [buy, sell, peak, interval]);
+  }, [buy, sell, peak]);
 
   useEffect(() => {
     const instance = chart.current;
@@ -116,27 +130,34 @@ export default function TossTenMinuteChart({ stockCode, band, pin, pinHeader, on
     if (!instance || !candleSeries) return;
     const live = interval === "10m";
     const timeScale = instance.timeScale();
-    instance.applyOptions({
-      localization: { timeFormatter: (time: UTCTimestamp) => (live ? timestamp : sessionDate).format(time * 1000) },
-      timeScale: { timeVisible: live, tickMarkFormatter: (time: Time, type: TickMarkType) => {
-        if (typeof time !== "number") return null;
-        const format = interval === "1y" || type === TickMarkType.Year ? year : type === TickMarkType.Time ? clock : date;
-        return format.format(time * 1000);
-      } },
-    });
+    function formatTimeAxis(showTime: boolean) {
+      instance!.applyOptions({
+        localization: { timeFormatter: (time: UTCTimestamp) => (showTime ? timestamp : sessionDate).format(time * 1000) },
+        timeScale: { timeVisible: showTime, tickMarkFormatter: (time: Time, type: TickMarkType) => {
+          if (typeof time !== "number") return null;
+          const format = interval === "1y" || type === TickMarkType.Year ? year : type === TickMarkType.Time ? clock : date;
+          return format.format(time * 1000);
+        } },
+      });
+    }
+    formatTimeAxis(live);
     candleSeries.setData([]);
     setCandles([]);
     setHoveredTime(undefined);
     setFailed(false);
+    setDailyFallback(false);
 
     const controller = new AbortController();
     let timer: number | undefined;
     let previous: Candle[] = [];
+    let showingDailyFallback = false;
 
     function renderCandles(incoming: Candle[]) {
       if (!previous.length) {
         candleSeries!.setData(incoming);
-        timeScale.setVisibleLogicalRange({ from: Math.max(0, incoming.length - 100) - 0.5, to: incoming.length - 0.5 });
+        if (incoming.length > 0) {
+          timeScale.setVisibleLogicalRange({ from: Math.max(0, incoming.length - 100) - 0.5, to: incoming.length - 0.5 });
+        }
         return incoming;
       }
 
@@ -169,14 +190,19 @@ export default function TossTenMinuteChart({ stockCode, band, pin, pinHeader, on
         }
         pollAfter = Math.max(15, Number(response.headers.get("X-Candle-Poll-After")) || 15);
         if (!response.ok) throw new Error("Candle request failed");
-        const rows: CandlePayload[] = await response.json();
-        if (!rows.length) throw new Error("No candles");
-        const incoming = rows.map((row) => ({
-          time: (typeof row.time === "number" ? row.time : Date.parse(row.time) / 1000) as UTCTimestamp,
-          open: Number(row.open), high: Number(row.high), low: Number(row.low), close: Number(row.close),
-        }));
+        const rows: (CandlePayload & { time: number | string })[] = await response.json();
+        const fallback = live && rows.length > 0 && rows.every((row) => typeof row.time === "string");
+        const incoming = normalizeCandles(rows);
+        if (!incoming.length) throw new Error("No candles");
         if (controller.signal.aborted) return;
+        if (fallback !== showingDailyFallback) {
+          formatTimeAxis(live && !fallback);
+          previous = [];
+          setHoveredTime(undefined);
+        }
         previous = renderCandles(incoming);
+        showingDailyFallback = fallback;
+        setDailyFallback(fallback);
         setCandles(previous);
         setFailed(false);
       } catch {
@@ -206,13 +232,13 @@ export default function TossTenMinuteChart({ stockCode, band, pin, pinHeader, on
           ))}
         </div>
         {latest && <p className="outlook-chart-quote">
-          {failed || interval !== "10m" ? "최근 종가" : "현재가"} <strong>{won.format(latest.close)}원</strong>
+          {failed || dailyFallback || interval !== "10m" ? "최근 종가" : "현재가"} <strong>{won.format(latest.close)}원</strong>
         </p>}
       </div>
       <div className="outlook-chart-details">
         {hovered && <>
           <time dateTime={new Date(hovered.time * 1000).toISOString()}>
-            {(interval === "10m" ? timestamp : sessionDate).format(hovered.time * 1000)}
+            {(interval === "10m" && !dailyFallback ? timestamp : sessionDate).format(hovered.time * 1000)}
           </time>
           {([["시가", hovered.open], ["고가", hovered.high], ["저가", hovered.low], ["종가", hovered.close]] as const)
             .map(([label, value]) => <span key={label}>{label} <strong>{won.format(value)}원</strong></span>)}
@@ -220,9 +246,12 @@ export default function TossTenMinuteChart({ stockCode, band, pin, pinHeader, on
       </div>
       <div className="outlook-chart-plot">
         <div className="outlook-chart-canvas" ref={container} />
-        {!latest && <p role="status">{failed ? "가격 차트를 불러올 수 없습니다." : "가격 차트를 불러오는 중입니다."}</p>}
+        {!latest && <p className="z-10 bg-white/80 text-sm text-[#6B7684]" role="status">
+          {failed ? "가격 차트를 불러올 수 없습니다." : "차트 데이터를 불러오는 중입니다..."}
+        </p>}
       </div>
       {failed && latest && <p className="outlook-note" role="status">가격 갱신이 지연되고 있습니다.</p>}
+      {dailyFallback && <p className="outlook-note" role="status">10분봉을 불러올 수 없어 최근 일봉을 표시합니다.</p>}
     </section>
   );
 }

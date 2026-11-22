@@ -104,7 +104,7 @@ async def stock_candles(request: Request, stock_code: Annotated[str, Path(patter
             content = await broker.redis.get(cache_key)
         except RedisError:
             content = None
-        if content is None:
+        if content in (None, "", b"", "[]", b"[]"):
             try:
                 if interval == "10m":
                     candles = await broker.get_ten_minute_candles(code)
