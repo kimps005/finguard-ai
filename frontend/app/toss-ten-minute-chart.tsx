@@ -49,7 +49,6 @@ export default function TossTenMinuteChart({ stockCode, band, pin, pinHeader, on
   const [candles, setCandles] = useState<Candle[]>([]);
   const [hoveredTime, setHoveredTime] = useState<number>();
   const [failed, setFailed] = useState(false);
-  const [dailyFallback, setDailyFallback] = useState(false);
   const latest = candles.at(-1);
   const hovered = candles.find((candle) => candle.time === hoveredTime) ?? latest;
   const buy = band?.levels.buy_zone.price;
@@ -66,7 +65,8 @@ export default function TossTenMinuteChart({ stockCode, band, pin, pinHeader, on
       grid: { horzLines: { color: "#F2F4F6" }, vertLines: { color: "#F2F4F6" } },
       crosshair: { mode: CrosshairMode.Normal, vertLine: { color: "#8B95A1" }, horzLine: { color: "#8B95A1" } },
       rightPriceScale: { borderColor: "#F2F4F6", scaleMargins: { top: 0.13, bottom: 0.13 } },
-      timeScale: { borderColor: "#F2F4F6", secondsVisible: false, fixLeftEdge: true, fixRightEdge: true },
+      timeScale: { borderColor: "#F2F4F6", secondsVisible: false,
+        barSpacing: 10, minBarSpacing: 7, maxBarSpacing: 13, rightOffset: 4 },
     });
     chart.current = instance;
     series.current = instance.addSeries(CandlestickSeries, {
@@ -130,33 +130,30 @@ export default function TossTenMinuteChart({ stockCode, band, pin, pinHeader, on
     if (!instance || !candleSeries) return;
     const live = interval === "10m";
     const timeScale = instance.timeScale();
-    function formatTimeAxis(showTime: boolean) {
-      instance!.applyOptions({
-        localization: { timeFormatter: (time: UTCTimestamp) => (showTime ? timestamp : sessionDate).format(time * 1000) },
-        timeScale: { timeVisible: showTime, tickMarkFormatter: (time: Time, type: TickMarkType) => {
-          if (typeof time !== "number") return null;
-          const format = interval === "1y" || type === TickMarkType.Year ? year : type === TickMarkType.Time ? clock : date;
-          return format.format(time * 1000);
-        } },
-      });
-    }
-    formatTimeAxis(live);
+    instance.applyOptions({
+      localization: { timeFormatter: (time: UTCTimestamp) => (live ? timestamp : sessionDate).format(time * 1000) },
+      timeScale: { timeVisible: live, tickMarkFormatter: (time: Time, type: TickMarkType) => {
+        if (typeof time !== "number") return null;
+        const format = interval === "1y" || type === TickMarkType.Year ? year : type === TickMarkType.Time ? clock : date;
+        return format.format(time * 1000);
+      } },
+    });
     candleSeries.setData([]);
     setCandles([]);
     setHoveredTime(undefined);
     setFailed(false);
-    setDailyFallback(false);
 
     const controller = new AbortController();
     let timer: number | undefined;
     let previous: Candle[] = [];
-    let showingDailyFallback = false;
 
     function renderCandles(incoming: Candle[]) {
       if (!previous.length) {
         candleSeries!.setData(incoming);
-        if (incoming.length > 0) {
-          timeScale.setVisibleLogicalRange({ from: Math.max(0, incoming.length - 100) - 0.5, to: incoming.length - 0.5 });
+        if (incoming.length >= 80) {
+          timeScale.setVisibleLogicalRange({ from: Math.max(0, incoming.length - 80), to: incoming.length + 3 });
+        } else {
+          timeScale.resetTimeScale();
         }
         return incoming;
       }
@@ -191,18 +188,10 @@ export default function TossTenMinuteChart({ stockCode, band, pin, pinHeader, on
         pollAfter = Math.max(15, Number(response.headers.get("X-Candle-Poll-After")) || 15);
         if (!response.ok) throw new Error("Candle request failed");
         const rows: (CandlePayload & { time: number | string })[] = await response.json();
-        const fallback = live && rows.length > 0 && rows.every((row) => typeof row.time === "string");
-        const incoming = normalizeCandles(rows);
+        const incoming = normalizeCandles(live ? rows.filter(({ time }) => typeof time === "number") : rows);
         if (!incoming.length) throw new Error("No candles");
         if (controller.signal.aborted) return;
-        if (fallback !== showingDailyFallback) {
-          formatTimeAxis(live && !fallback);
-          previous = [];
-          setHoveredTime(undefined);
-        }
         previous = renderCandles(incoming);
-        showingDailyFallback = fallback;
-        setDailyFallback(fallback);
         setCandles(previous);
         setFailed(false);
       } catch {
@@ -232,13 +221,13 @@ export default function TossTenMinuteChart({ stockCode, band, pin, pinHeader, on
           ))}
         </div>
         {latest && <p className="outlook-chart-quote">
-          {failed || dailyFallback || interval !== "10m" ? "최근 종가" : "현재가"} <strong>{won.format(latest.close)}원</strong>
+          {failed || interval !== "10m" ? "최근 종가" : "현재가"} <strong>{won.format(latest.close)}원</strong>
         </p>}
       </div>
       <div className="outlook-chart-details">
         {hovered && <>
           <time dateTime={new Date(hovered.time * 1000).toISOString()}>
-            {(interval === "10m" && !dailyFallback ? timestamp : sessionDate).format(hovered.time * 1000)}
+            {(interval === "10m" ? timestamp : sessionDate).format(hovered.time * 1000)}
           </time>
           {([["시가", hovered.open], ["고가", hovered.high], ["저가", hovered.low], ["종가", hovered.close]] as const)
             .map(([label, value]) => <span key={label}>{label} <strong>{won.format(value)}원</strong></span>)}
@@ -251,7 +240,6 @@ export default function TossTenMinuteChart({ stockCode, band, pin, pinHeader, on
         </p>}
       </div>
       {failed && latest && <p className="outlook-note" role="status">가격 갱신이 지연되고 있습니다.</p>}
-      {dailyFallback && <p className="outlook-note" role="status">10분봉을 불러올 수 없어 최근 일봉을 표시합니다.</p>}
     </section>
   );
 }

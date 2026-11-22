@@ -169,6 +169,21 @@ def candle_period_start(session: date, period: str) -> date:
     return session
 
 
+def aggregate_ten_minute_candles(rows) -> list[Candle]:
+    candles: dict[int, Candle] = {}
+    for stamp, (open_, high, low, close, volume) in sorted(rows.items()):
+        bucket = stamp // 600 * 600
+        candle = candles.get(bucket)
+        if candle is None:
+            candles[bucket] = Candle(bucket, open_, high, low, close, volume)
+        else:
+            candle.high = max(candle.high, high)
+            candle.low = min(candle.low, low)
+            candle.close = close
+            candle.volume += volume
+    return list(candles.values())
+
+
 def symbol(code: str) -> str:
     code = code.strip()
     if len(code) == 7 and code[0] in {"A", "Q"}:
@@ -209,15 +224,15 @@ async def load_stock_master(codes: list[str]) -> dict:
 class PykrxMarketData:
     """Synchronous adapter. BrokerConnector runs its calls off the event loop."""
 
-    def daily(self, code, start, end, asset_type=None):
+    def daily(self, code, start, end, asset_type=None, *, adjusted=False):
         from pykrx import stock
 
         args = (day_string(start), day_string(end), code)
-        if asset_type == "ETF":
+        if asset_type == "ETF" and not adjusted:
             frame = stock.get_etf_ohlcv_by_date(*args)
         else:
             # PyKRX's adjusted route uses Naver, which accepts ETN tickers.
-            frame = stock.get_market_ohlcv_by_date(*args, adjusted=asset_type == "ETN")
+            frame = stock.get_market_ohlcv_by_date(*args, adjusted=adjusted or asset_type == "ETN")
         if frame.empty:
             return ()
         columns = ["시가", "고가", "저가", "종가", "거래량"]
@@ -552,10 +567,12 @@ class BrokerConnector:
             return [candles[bucket] for bucket in sorted(candles)]
 
         fallback_days = 30 if recent else {"D": 365, "W": 1825, "Y": 5475}[period]
+        fallback_options = {"adjusted": True} if period == "Y" else {}
         try:
             async with self.semaphore:
                 bars = await asyncio.to_thread(self.market_data.daily, symbol(stock_code),
-                                               today - timedelta(days=fallback_days), today, asset_type)
+                                               today - timedelta(days=fallback_days), today, asset_type,
+                                               **fallback_options)
         except Exception as exc:
             raise BrokerError("PyKRX candle fallback failed") from exc
         for bar in sorted({bar.session: bar for bar in bars}.values(), key=lambda bar: bar.session):
@@ -580,27 +597,65 @@ class BrokerConnector:
         session = calendar.date_to_session(now.date(), direction="previous")
         if now < calendar.session_open(session):
             session = calendar.previous_session(session)
-        pages = iter(range(6))
         candles = {}
-        for offset in range(6):
+        complete_sessions = 0
+        # A current-session page can contain only 30 one-minute bars.
+        pages = iter(range(5 * 14))
+        for offset in range(5):
             start = calendar.session_open(session).astimezone(KST).to_pydatetime()
             close = calendar.session_close(session).astimezone(KST).to_pydatetime()
             try:
                 if now >= close:
-                    bars = await self._completed_minute_session(code, start, close, pages)
+                    bars, complete = await self._completed_minute_session(code, start, close, pages)
                 else:
-                    bars, _ = await self._minute_candles(code, start, now, historical=False, pages=pages)
+                    bars, complete = await self._minute_candles(code, start, now, historical=False, pages=pages)
             except BrokerError as exc:
                 logger.warning("KIS 10m candle history failed: %s", exc.__cause__ or exc)
                 break
             candles.update((bar.time, bar) for bar in bars)
-            if offset < 5:
+            if bars and complete:
+                complete_sessions += 1
+            if offset < 4:
                 session = calendar.previous_session(session)
-        if candles:
-            return [candles[stamp] for stamp in sorted(candles)]
-        return await self.get_candle_history(stock_code, "D", recent=True)
+        if complete_sessions < 5:
+            for bar in await self._public_ten_minute_candles(symbol(stock_code)):
+                candles.setdefault(bar.time, bar)
+        dates = {stamp: datetime.fromtimestamp(stamp, KST).date() for stamp in candles}
+        recent_sessions = set(sorted(set(dates.values()))[-5:])
+        return [candles[stamp] for stamp in sorted(candles) if dates[stamp] in recent_sessions]
 
-    async def _completed_minute_session(self, code: str, start: datetime, close: datetime, pages) -> list[Candle]:
+    async def _public_ten_minute_candles(self, code: str) -> list[Candle]:
+        fields = ("open", "high", "low", "close", "volume")
+        for exchange in ("KS", "KQ"):
+            try:
+                async with self.semaphore:
+                    response = await self.http.get(
+                        f"https://query1.finance.yahoo.com/v8/finance/chart/{code}.{exchange}",
+                        params={"range": "5d", "interval": "5m", "includePrePost": "false"},
+                        headers={"User-Agent": "Mozilla/5.0"},
+                    )
+                response.raise_for_status()
+                result = response.json(parse_float=Decimal)["chart"]["result"][0]
+                if result["meta"]["dataGranularity"] != "5m":
+                    continue
+                quote = result["indicators"]["quote"][0]
+                rows = zip(result["timestamp"], *(quote[field] for field in fields), strict=True)
+                bars = {}
+                for stamp, *values in rows:
+                    if type(stamp) is not int or None in values:
+                        continue
+                    prices = tuple(map(number, values))
+                    if min(prices[:4]) > ZERO and prices[4] >= ZERO:
+                        bars[stamp] = prices
+                if bars:
+                    return aggregate_ten_minute_candles(bars)
+            except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError, DecimalException) as exc:
+                logger.warning("Public 5m candle lookup failed for %s.%s (%s)", code, exchange,
+                               type(exc).__name__)
+        return []
+
+    async def _completed_minute_session(self, code: str, start: datetime, close: datetime,
+                                        pages) -> tuple[list[Candle], bool]:
         key = f"finguard:candles:10m-session:{code}:{start.date()}"
         try:
             cached = await self.redis.get(key)
@@ -611,18 +666,18 @@ class BrokerConnector:
                     if type(stamp) is int and min(open_, high, low, close_) > ZERO and volume >= ZERO:
                         bars.append(Candle(stamp, open_, high, low, close_, volume))
                 if bars:
-                    return bars
+                    return bars, True
         except (RedisError, ValueError, TypeError, DecimalException):
             pass
         candles, complete = await self._minute_candles(code, start, close, historical=True, pages=pages)
         if not candles or not complete:
-            return candles
+            return candles, complete
         payload = [(bar.time, bar.open, bar.high, bar.low, bar.close, bar.volume) for bar in candles]
         try:
             await self.redis.set(key, json.dumps(payload, default=str), ex=86400)
         except RedisError:
             pass
-        return candles
+        return candles, complete
 
     async def _minute_candles(self, code: str, start: datetime, cursor: datetime, *,
                               historical: bool, pages) -> tuple[list[Candle], bool]:
@@ -630,7 +685,7 @@ class BrokerConnector:
         params = {"FID_PW_DATA_INCU_YN": "Y", "FID_ETC_CLS_CODE": ""}
         if historical:
             endpoint, tr_id = "inquire-time-dailychartprice", "FHKST03010230"
-            params = {"FID_PW_DATA_INCU_YN": "N", "FID_FAKE_TICK_INCU_YN": "",
+            params = {"FID_PW_DATA_INCU_YN": "Y", "FID_FAKE_TICK_INCU_YN": "",
                       "FID_INPUT_DATE_1": day_string(cursor.date())}
 
         session = cursor.date()
@@ -662,7 +717,7 @@ class BrokerConnector:
                 timestamps.append(stamp)
                 values = candle_values(row, "stck_prpr", "cntg_vol")
                 if values is not None:
-                    page[stamp] = values
+                    page[int(stamp.timestamp())] = values
             if not timestamps:
                 complete = True
                 break
@@ -672,19 +727,7 @@ class BrokerConnector:
                 complete = True
                 break
 
-        candles: dict[int, Candle] = {}
-        for stamp in sorted(minutes):
-            open_, high, low, close, volume = minutes[stamp]
-            bucket = int(stamp.timestamp()) // 600 * 600
-            if bucket not in candles:
-                candles[bucket] = Candle(bucket, open_, high, low, close, volume)
-            else:
-                candle = candles[bucket]
-                candle.high = max(candle.high, high)
-                candle.low = min(candle.low, low)
-                candle.close = close
-                candle.volume += volume
-        return list(candles.values()), complete
+        return aggregate_ten_minute_candles(minutes), complete
 
     async def get_five_day_flow(self, stock_code: str, *, as_of: datetime | None = None,
                                  asset_type=None) -> FiveDayFlow:
