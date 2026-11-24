@@ -1,7 +1,7 @@
 """One-month price scenarios, with a local result before disclosure synthesis."""
 
 import asyncio
-from datetime import time, timedelta
+from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
 import logging
 import re
@@ -9,7 +9,7 @@ import re
 from pydantic import BaseModel, Field
 
 from backend import dart_rag, llm
-from backend.broker import KST
+from backend.market_time import KST, confirmed_day
 from backend.portfolio_market import stock_master
 from backend.stock_analysis import ALIAS, RECEIPT, Analysis, dump
 
@@ -141,7 +141,7 @@ async def stock_price_band_updates(market, stock_code):
 
     broker = market.broker
     now = broker.clock().astimezone(KST)
-    end = now.date() - timedelta(days=now.time() < time(15, 40))
+    end = confirmed_day(now)
     quote, bars, flow = await asyncio.gather(
         optional_data(broker.get_quote(stock_code, asset_type=stock.asset_type), 10),
         optional_data(broker.get_daily_bars(stock_code, end - timedelta(days=60), end,
@@ -187,7 +187,7 @@ async def stock_price_band_updates(market, stock_code):
 async def price_band_updates(market):
     balance = await market.broker.get_balance()
     now = market.broker.clock().astimezone(KST)
-    end = now.date() - timedelta(days=now.time() < time(15, 40))
+    end = confirmed_day(now)
 
     async def collect(holding):
         bars, flow = await asyncio.gather(

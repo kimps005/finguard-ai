@@ -11,9 +11,10 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, StringConstraints
 from redis.exceptions import RedisError
 
-from backend.broker import BrokerConfigurationError, BrokerConnector, BrokerError, candle_poll_delay
+from backend.broker import BrokerConfigurationError, BrokerConnector, BrokerError
 from backend.connectors import ExternalConnectors
 from backend.dart_etl import DartETL
+from backend.market_time import candle_poll_delay
 from backend.portfolio_graph import account_view, build_graph
 from backend.portfolio_market import MarketData, search_stocks
 from backend.price_bands import StockPriceUnavailable, price_band_updates, stock_price_band_updates

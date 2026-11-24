@@ -3,25 +3,23 @@
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, DecimalException
-from functools import lru_cache
 from hashlib import sha256
 import json
 import logging
 import os
 import threading
 import time as wall_clock
-from zoneinfo import ZoneInfo
 
-import exchange_calendars
 import httpx
 import psycopg
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
+from backend.market_time import KST, candle_poll_delay, confirmed_day, krx_calendar  # noqa: F401
 
-KST = ZoneInfo("Asia/Seoul")
+
 LIVE = "https://openapi.koreainvestment.com:9443"
 VIRTUAL = "https://openapivts.koreainvestment.com:29443"
 DOMESTIC = "/uapi/domestic-stock/v1"
@@ -195,20 +193,6 @@ def symbol(code: str) -> str:
 
 def day_string(value: date) -> str:
     return value.strftime("%Y%m%d")
-
-
-@lru_cache(maxsize=1)
-def krx_calendar():
-    return exchange_calendars.get_calendar("XKRX")
-
-
-def candle_poll_delay(now: datetime) -> int:
-    calendar = krx_calendar()
-    session = calendar.date_to_session(now.astimezone(KST).date(), direction="next")
-    if now >= calendar.session_close(session) + timedelta(seconds=30):
-        session = calendar.next_session(session)
-    wait = calendar.session_open(session) - now
-    return max(15, wait.days * 86400 + wait.seconds + 1)
 
 
 async def load_stock_master(codes: list[str]) -> dict:
@@ -753,10 +737,8 @@ class BrokerConnector:
         if as_of.utcoffset() is None:
             raise ValueError("as_of must be timezone-aware")
         kis_code, asset_type = self._market_symbol(stock_code, asset_type)
-        local = as_of.astimezone(KST)
-        cutoff = local.date() - timedelta(days=local.time() < time(15, 40))
         calendar = krx_calendar()
-        last = calendar.date_to_session(cutoff, direction="previous")
+        last = calendar.date_to_session(confirmed_day(as_of), direction="previous")
         sessions = [last.date()]
         for _ in range(4):
             last = calendar.previous_session(last)

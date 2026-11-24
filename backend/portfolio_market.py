@@ -9,10 +9,11 @@ import json
 import psycopg
 from psycopg.rows import dict_row
 
-from backend.broker import KST, BrokerConnector, DailyBar, FiveDayFlow, Holding
+from backend.broker import BrokerConnector, DailyBar, FiveDayFlow, Holding
 from backend.connectors import ExternalConnectors
 from backend.dart_etl import DartETL
 from backend.finance_calc import ANNUAL, THIRD, DartReports, LockupRelease
+from backend.market_time import KST, confirmed_day
 from backend.sync_stock_master import Stock
 
 
@@ -109,7 +110,7 @@ class MarketData:
                     code, as_of=now, asset_type=stock.asset_type))
                 if stock.asset_type == "STOCK":
                     # Both MA windows must end on a completed trading session.
-                    end = on - timedelta(days=(now.hour, now.minute) < (15, 40))
+                    end = confirmed_day(now)
                     bars = group.create_task(self.broker.get_daily_bars(
                         code, end - timedelta(days=60), end, asset_type=stock.asset_type))
                     events = await issuer if issuer else None
