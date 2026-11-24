@@ -25,16 +25,20 @@ def candle_period_start(session: date, period: str) -> date:
     return session
 
 
+def fold_bar(candles: dict, bucket, open_, high, low, close, volume) -> None:
+    """Merge one bar into its bucket's candle. Bars must arrive in time order."""
+    candle = candles.get(bucket)
+    if candle is None:
+        candles[bucket] = Candle(bucket, open_, high, low, close, volume)
+    else:
+        candle.high = max(candle.high, high)
+        candle.low = min(candle.low, low)
+        candle.close = close
+        candle.volume += volume
+
+
 def aggregate_ten_minute_candles(rows) -> list[Candle]:
     candles: dict[int, Candle] = {}
-    for stamp, (open_, high, low, close, volume) in sorted(rows.items()):
-        bucket = stamp // 600 * 600
-        candle = candles.get(bucket)
-        if candle is None:
-            candles[bucket] = Candle(bucket, open_, high, low, close, volume)
-        else:
-            candle.high = max(candle.high, high)
-            candle.low = min(candle.low, low)
-            candle.close = close
-            candle.volume += volume
+    for stamp, values in sorted(rows.items()):
+        fold_bar(candles, stamp // 600 * 600, *values)
     return list(candles.values())

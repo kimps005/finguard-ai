@@ -14,7 +14,7 @@ import httpx
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
-from backend.broker.candles import aggregate_ten_minute_candles, candle_period_start, candle_values
+from backend.broker.candles import aggregate_ten_minute_candles, candle_period_start, candle_values, fold_bar
 from backend.broker.models import (
     ZERO, Balance, BrokerConfigurationError, BrokerError, Candle, DailyBar, FiveDayFlow, Holding,
     InvestorFlow, Quote, RetryableBrokerError, day_string, master_identity, number, symbol,
@@ -383,15 +383,7 @@ class BrokerConnector:
             prices = (bar.open, bar.high, bar.low, bar.close)
             if not all(price.is_finite() and price > ZERO for price in prices):
                 continue
-            bucket = candle_period_start(bar.session, period)
-            candle = candles.get(bucket)
-            if candle is None:
-                candles[bucket] = Candle(bucket, *prices, bar.volume)
-            else:
-                candle.high = max(candle.high, bar.high)
-                candle.low = min(candle.low, bar.low)
-                candle.close = bar.close
-                candle.volume += bar.volume
+            fold_bar(candles, candle_period_start(bar.session, period), *prices, bar.volume)
         return [candles[bucket] for bucket in sorted(candles)]
 
     async def get_ten_minute_candles(self, stock_code: str) -> list[Candle]:
