@@ -1,0 +1,7 @@
+# Local development: publish only the data services on loopback so host processes can reach them.
+# Used by scripts/dev.py:  docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --wait db redis
+services:
+  db:
+    ports: ["127.0.0.1:${PGPORT:-55432}:5432"]
+  redis:
+    ports: ["127.0.0.1:56379:6379"]
