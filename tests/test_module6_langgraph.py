@@ -442,3 +442,11 @@ def test_real_langchain_adapters_parse_gemini_fallback(monkeypatch):
     assert asyncio.run(stock_analysis.analyze('{"name":"가상 종목"}')) == {"analysis_text": "공시 분석", "citations": []}
     dash.assert_awaited_once()
     google.assert_awaited_once()
+
+
+def test_done_event_exposes_every_public_state_field_and_no_internal_one():
+    from backend.main import PUBLIC_FIELDS
+    from backend.portfolio_graph import PortfolioState
+
+    internal = {"user_query", "stock_analysis_results", "balance", "as_of", "score_inputs"}
+    assert set(PUBLIC_FIELDS) == set(PortfolioState.__annotations__) - internal

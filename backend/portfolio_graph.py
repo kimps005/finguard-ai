@@ -26,16 +26,18 @@ class Query(TypedDict):
 
 
 class PortfolioState(Query, total=False):
+    # Public: streamed to the client in the final "done" event (main.PUBLIC_FIELDS).
     intent_type: Literal["fast_lookup", "deep_diagnosis", "simulation"]
     account_summary: dict
     holdings: list[dict]
     quant_scorecards: dict[str, dict]
     macro_context: dict | None
-    stock_analysis_results: Annotated[list[dict], operator.add]
-    verified_stock_results: list[dict]
+    verified_stock_results: list[dict]  # No reducer: the guardrail writes it once, so it never accumulates.
     guardrail_warnings: list[str]
     simulation_result: dict | None
     final_report: str
+    # Internal: typed inputs shared between nodes, never serialized to the client.
+    stock_analysis_results: Annotated[list[dict], operator.add]  # Fan-out buffer, one entry per worker.
     balance: Balance
     as_of: date
     score_inputs: dict[str, ScoreInputs]
@@ -115,6 +117,8 @@ def build_graph(market: MarketData):
     async def market_data_node(state):
         balance, on, macro, inputs = await market.collect()
         view = account_view(balance)
+        # Fan-out picks STOCK rows with a corp_code and reads score_inputs for them, so the
+        # public rows must carry exactly the mapping the score inputs were collected with.
         for row in view["holdings"]:
             entry = inputs.get(row["stock_code"])
             row.update(asset_type=entry.stock.asset_type if entry else None,
