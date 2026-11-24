@@ -16,9 +16,10 @@ from backend.connectors import ExternalConnectors
 from backend.dart_etl import DartETL
 from backend.market_time import candle_poll_delay
 from backend.portfolio_graph import account_view, build_graph
-from backend.portfolio_market import MarketData, search_stocks
+from backend.portfolio_market import MarketData
 from backend.price_bands import StockPriceUnavailable, price_band_updates, stock_price_band_updates
 from backend.serialization import dump
+from backend.stock_master import search_stocks
 from backend.toss_broker import TossBrokerConnector, TossSettings
 
 

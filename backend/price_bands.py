@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from backend import dart_rag, llm
 from backend.market_time import KST, confirmed_day
-from backend.portfolio_market import stock_master
+from backend.stock_master import fetch_stocks
 from backend.citations import ALIAS, RECEIPT, AliasBook
 from backend.serialization import dump
 from backend.stock_analysis import Analysis
@@ -137,7 +137,7 @@ def enrich_band(band, reasons, references):
 
 
 async def stock_price_band_updates(market, stock_code):
-    stock = (await stock_master([stock_code])).get(stock_code)
+    stock = (await fetch_stocks([stock_code])).get(stock_code)
     if stock is None:
         raise StockPriceUnavailable("등록된 종목을 찾을 수 없습니다.")
 

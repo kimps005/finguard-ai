@@ -77,7 +77,7 @@ def test_market_band_without_history_is_indicative():
 
 
 def test_target_stream_sends_local_band_then_cited_disclosure(monkeypatch):
-    monkeypatch.setattr(price_bands, "stock_master", AsyncMock(return_value={"005930": STOCK}))
+    monkeypatch.setattr(price_bands, "fetch_stocks", AsyncMock(return_value={"005930": STOCK}))
     monkeypatch.setattr(dart_rag, "search", AsyncMock(return_value=[
         {"rcept_no": RECEIPT, "report_nm": f"실적 공시 {RECEIPT}", "chunk_text": "영업이익이 늘었다."}]))
     answer = price_bands.BandAnalysis(analysis_text="요약", citations=["DOC-1"], reasons=[price_bands.Reasons(
@@ -110,7 +110,7 @@ def test_target_stream_sends_local_band_then_cited_disclosure(monkeypatch):
     (NOW.replace(hour=15, minute=40), date(2026, 11, 20)),
 ])
 def test_daily_bars_end_on_the_last_confirmed_session(monkeypatch, now, end):
-    monkeypatch.setattr(price_bands, "stock_master", AsyncMock(return_value={"005930": STOCK}))
+    monkeypatch.setattr(price_bands, "fetch_stocks", AsyncMock(return_value={"005930": STOCK}))
     monkeypatch.setattr(llm, "invoke", AsyncMock(side_effect=llm.LLMUnavailable("offline")))
     monkeypatch.setattr(dart_rag, "search", AsyncMock(return_value=[]))
     data = market(now)
@@ -120,11 +120,11 @@ def test_daily_bars_end_on_the_last_confirmed_session(monkeypatch, now, end):
 
 
 def test_unknown_or_unpriced_stock_ends_with_error(monkeypatch):
-    monkeypatch.setattr(price_bands, "stock_master", AsyncMock(return_value={}))
+    monkeypatch.setattr(price_bands, "fetch_stocks", AsyncMock(return_value={}))
     events = parse(asyncio.run(collect(price_band_events(market(), "999999"))))
     assert events[1:] == [("error", {"message": "등록된 종목을 찾을 수 없습니다."}), ("done", {"ok": False})]
 
-    monkeypatch.setattr(price_bands, "stock_master", AsyncMock(return_value={"005930": STOCK}))
+    monkeypatch.setattr(price_bands, "fetch_stocks", AsyncMock(return_value={"005930": STOCK}))
     data = market()
     data.broker.get_quote.side_effect = RuntimeError("down")
     data.broker.get_daily_bars.return_value = ()

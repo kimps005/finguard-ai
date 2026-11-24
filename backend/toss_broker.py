@@ -8,7 +8,7 @@ import os
 
 from backend.broker import (
     ZERO, Balance, BrokerConfigurationError, BrokerConnector, BrokerError,
-    Holding, RetryableBrokerError, number,
+    Holding, RetryableBrokerError, master_identity, number,
 )
 
 
@@ -111,7 +111,7 @@ class TossBrokerConnector(BrokerConnector):
             holdings = []
             for row, quantity in positions:
                 code = row["symbol"]
-                asset_type, corp_code, isin = master.get(code, (None, None, None))
+                asset_type, corp_code, isin = master_identity(master.get(code))
                 value = number(row["marketValue"]["amount"])
                 holdings.append(Holding(
                     code, row["name"], asset_type, corp_code, isin, quantity,

@@ -14,6 +14,7 @@ from backend.connectors import ExternalConnectors
 from backend.dart_etl import DartETL
 from backend.finance_calc import ANNUAL, THIRD, DartReports, LockupRelease
 from backend.market_time import KST, confirmed_day
+from backend.stock_master import fetch_stocks
 from backend.sync_stock_master import Stock
 
 
@@ -25,34 +26,6 @@ class ScoreInputs:
     reports: DartReports | None = None
     releases: list[LockupRelease] | None = None
     events: list[dict] | None = None
-
-
-async def stock_master(codes: list[str]) -> dict[str, Stock]:
-    if not codes:
-        return {}
-    async with await psycopg.AsyncConnection.connect(row_factory=dict_row) as conn:
-        cursor = await conn.execute(
-            "SELECT stock_code, corp_code, isin_cd, crno, corp_name, asset_type, induty_code, "
-            "listed_shares::numeric FROM stock_master WHERE stock_code = ANY(%s)", (codes,))
-        return {row["stock_code"]: Stock(**row) for row in await cursor.fetchall()}
-
-
-async def search_stocks(query: str) -> list[dict]:
-    if not query:
-        return []
-    async with await psycopg.AsyncConnection.connect(row_factory=dict_row) as conn:
-        cursor = await conn.execute(
-            """SELECT stock_code, corp_name, market
-               FROM stock_master
-               WHERE stock_code = upper(%(q)s)
-                  OR strpos(lower(corp_name), lower(%(q)s)) > 0
-               ORDER BY CASE WHEN stock_code = upper(%(q)s) THEN 0
-                             WHEN lower(corp_name) = lower(%(q)s) THEN 1
-                             WHEN starts_with(lower(corp_name), lower(%(q)s)) THEN 2
-                             ELSE 3 END,
-                        length(corp_name), stock_code
-               LIMIT 8""", {"q": query})
-        return await cursor.fetchall()
 
 
 async def outstanding_events(corp_code: str, on: date) -> list[dict]:
@@ -126,7 +99,7 @@ class MarketData:
         async with asyncio.TaskGroup() as group:
             macro = group.create_task(self.external.get_macro_context(as_of=on))
             balance = await self.broker.get_balance()
-            master = await stock_master([item.stock_code for item in balance.holdings])
+            master = await fetch_stocks([item.stock_code for item in balance.holdings])
             issuers, reports, jobs = {}, {}, {}
             for code, stock in master.items():
                 corp = stock.corp_code

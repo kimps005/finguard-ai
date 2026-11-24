@@ -13,6 +13,7 @@ import pytest
 from backend.broker import BrokerConfigurationError, BrokerConnector, BrokerError, BrokerSettings, KST, LIVE, VIRTUAL
 from backend.main import app
 from backend.portfolio_market import MarketData
+from backend.sync_stock_master import Stock
 from backend.toss_broker import TossBrokerConnector, TossSettings
 
 
@@ -53,6 +54,10 @@ def settings(monkeypatch):
     return BrokerSettings.from_env()
 
 
+def stock(code, asset_type, corp_code):
+    return Stock(code, corp_code, "KR7" + code + "000", None, "종목" + code, asset_type, None, Decimal(1000))
+
+
 def market_rows():
     return [
         {"stck_bsop_date": session.strftime("%Y%m%d"), "frgn_ntby_qty": str(index),
@@ -69,7 +74,7 @@ def test_toss_snapshot_and_cash_use_documented_read_only_api(settings, monkeypat
         "marketValue": {"purchaseAmount": "200.3125", "amount": "250.625"},
         "profitLoss": {"amount": "50.3125", "rate": "0.25117"},
     }
-    master = AsyncMock(return_value={"005930": ("STOCK", "00123456", "common")})
+    master = AsyncMock(return_value={"005930": stock("005930", "STOCK", "00123456")})
 
     def handle(request):
         path = request.url.path
@@ -144,10 +149,10 @@ def test_account_domain_and_market_domains(settings, monkeypatch, is_virtual):
     settings = BrokerSettings.from_env()
     request_log = []
     master = AsyncMock(return_value={
-        "005930": ("STOCK", "00123456", "common"),
-        "005935": ("STOCK", "00123456", "preferred"),
-        "069500": ("ETF", None, "etf"),
-        "580001": ("ETN", None, "etn"),
+        "005930": stock("005930", "STOCK", "00123456"),
+        "005935": stock("005935", "STOCK", "00123456"),
+        "069500": stock("069500", "ETF", None),
+        "580001": stock("580001", "ETN", None),
     })
 
     async def handle(request):

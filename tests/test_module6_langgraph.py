@@ -55,7 +55,7 @@ def setup_market(monkeypatch, positions):
     external.get_news.return_value = [{"title": "종목 뉴스", "description": "배당 관련 보도"}]
     stocks = {h.stock_code: Stock(h.stock_code, h.corp_code, h.isin_cd, None, h.name, h.asset_type,
                                   "261", D(10000)) for h in positions}
-    monkeypatch.setattr(portfolio_market, "stock_master", AsyncMock(return_value=stocks))
+    monkeypatch.setattr(portfolio_market, "fetch_stocks", AsyncMock(return_value=stocks))
     event = {"corp_code": "00000001", "rcept_no": RECEIPT, "event_type": "CB",
              "board_resolution_date": DAY, "convertible_shares": 10}
     monkeypatch.setattr(portfolio_market, "outstanding_events", AsyncMock(return_value=[event]))
@@ -219,7 +219,7 @@ def test_fast_path_stream_and_latency(monkeypatch):
     market.broker.get_balance.assert_awaited_once_with()
     assert not market.etl.method_calls and not market.external.method_calls
     assert not market.broker.get_five_day_flow.called and not dart_rag.search.called
-    portfolio_market.stock_master.assert_not_called()
+    portfolio_market.fetch_stocks.assert_not_called()
     llm.ChatOpenAI.assert_called_once()
     llm.ChatGoogleGenerativeAI.assert_not_called()
 

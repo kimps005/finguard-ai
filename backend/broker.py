@@ -13,11 +13,11 @@ import threading
 import time as wall_clock
 
 import httpx
-import psycopg
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from backend.market_time import KST, candle_poll_delay, confirmed_day, krx_calendar  # noqa: F401
+from backend.stock_master import fetch_stocks
 
 
 LIVE = "https://openapi.koreainvestment.com:9443"
@@ -195,16 +195,11 @@ def day_string(value: date) -> str:
     return value.strftime("%Y%m%d")
 
 
-async def load_stock_master(codes: list[str]) -> dict:
-    if not codes:
-        return {}
-    async with await psycopg.AsyncConnection.connect() as connection:
-        cursor = await connection.execute(
-            "SELECT stock_code, asset_type, corp_code, isin_cd FROM stock_master "
-            "WHERE stock_code = ANY(%s)", (codes,)
-        )
-        return {code: (asset_type, corp_code, isin) for code, asset_type, corp_code, isin
-                in await cursor.fetchall()}
+def master_identity(stock) -> tuple[str | None, str | None, str | None]:
+    """Holding identifiers from a stock_master row; all None for an unmapped security."""
+    if stock is None:
+        return None, None, None
+    return stock.asset_type, stock.corp_code, stock.isin_cd
 
 
 class PykrxMarketData:
@@ -259,7 +254,7 @@ class PykrxMarketData:
 class BrokerConnector:
     """Share one instance per backend process to share the request semaphore."""
 
-    def __init__(self, settings, redis, http, *, market_data=None, stock_master=load_stock_master,
+    def __init__(self, settings, redis, http, *, market_data=None, stock_master=fetch_stocks,
                  clock=None, sleep=asyncio.sleep):
         self.settings = settings
         self.redis = redis
@@ -417,7 +412,7 @@ class BrokerConnector:
         holdings = []
         for row, quantity in positions:
             code = symbol(row["pdno"])
-            asset_type, corp_code, isin = master.get(code, (None, None, None))
+            asset_type, corp_code, isin = master_identity(master.get(code))
             avg, price, cost, value, pnl, pnl_pct = (number(row[field]) for field in (
                 "pchs_avg_pric", "prpr", "pchs_amt", "evlu_amt", "evlu_pfls_amt", "evlu_pfls_rt",
             ))
