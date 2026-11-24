@@ -160,7 +160,8 @@ def test_naver_news_sanitizes_normalizes_and_deduplicates(monkeypatch, hub, url,
             article("<b>삼성전자</b> &amp; 반도체", "https://naver.test/1", "06",
                     original="https://news.test/1?a=1&amp;b=2"),
             article("다른 제목", "https://naver.test/1#article", "05"),
-            article("&lt;b&gt;업계 동향&lt;/b&gt;", "https://news.test/2", "03"),
+            article("&lt;b&gt;삼성전자 업계 동향&lt;/b&gt;", "https://news.test/2", "03"),
+            article("종목명 없는 업계 동향", "https://news.test/3", "02"),
             {"title": "잘못된 기사", "pubDate": "invalid"},
         ]})
 
@@ -168,7 +169,8 @@ def test_naver_news_sanitizes_normalizes_and_deduplicates(monkeypatch, hub, url,
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
             api = connectors.ExternalConnectors.from_env(http, MemoryRedis())
             news = await api.get_news(STOCK["corp_name"])
-            assert [item["title"] for item in news] == ["삼성전자 & 반도체", "업계 동향"]
+            # Articles whose title does not name the issuer are dropped as unrelated.
+            assert [item["title"] for item in news] == ["삼성전자 & 반도체", "삼성전자 업계 동향"]
             assert news[0] == {"title": "삼성전자 & 반도체", "description": '실적 "발표" & 전망',
                                "link": "https://news.test/1?a=1&b=2", "naver_link": "https://naver.test/1",
                                "published_at": datetime(2026, 11, 20, 15, tzinfo=KST)}
