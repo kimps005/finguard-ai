@@ -213,7 +213,8 @@ def test_exact_hybrid_candidates_are_scoped_before_limit_and_reranked(db, monkey
     with db.transaction():
         db.execute("SET LOCAL enable_seqscan = off")
         plan = db.execute("EXPLAIN " + rag.HYBRID_SQL, {"corp": CORP, "terms": "전환",
-                          "vector": json.dumps(VECTOR), "candidates": 2}).fetchall()
+                          "vector": json.dumps(VECTOR), "candidates": 2,
+                          "since": None, "until": None}).fetchall()
         assert "idx_dart_chunks_corp" in str(plan) and "CTE Scan" in str(plan)
         gin = db.execute("EXPLAIN SELECT * FROM dart_chunks WHERE search_tsv @@ "
                          "plainto_tsquery('simple','전환')").fetchall()
