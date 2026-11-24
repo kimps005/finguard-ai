@@ -16,9 +16,10 @@ from backend.broker import BrokerConfigurationError, BrokerConnector, BrokerErro
 from backend.connectors import ExternalConnectors
 from backend.dart_etl import DartETL
 from backend.market_time import candle_poll_delay
-from backend.portfolio_graph import account_view, build_graph
+from backend.portfolio_graph import build_graph
 from backend.portfolio_market import MarketData
 from backend.price_bands import StockPriceUnavailable, price_band_updates, stock_price_band_updates
+from backend.report import account_view
 from backend.serialization import dump
 from backend.stock_master import search_stocks
 from backend.toss_broker import TossSettings, toss_account
