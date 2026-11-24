@@ -9,38 +9,26 @@ from hashlib import sha256
 import json
 import logging
 import os
-import threading
-import time as wall_clock
 
 import httpx
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
-from backend.market_time import KST, candle_poll_delay, confirmed_day, krx_calendar  # noqa: F401
+from backend.broker.candles import aggregate_ten_minute_candles, candle_period_start, candle_values
+from backend.broker.models import (
+    ZERO, Balance, BrokerConfigurationError, BrokerError, Candle, DailyBar, FiveDayFlow, Holding,
+    InvestorFlow, Quote, RetryableBrokerError, day_string, master_identity, number, symbol,
+)
+from backend.broker.pykrx_source import PykrxMarketData
+from backend.market_time import KST, confirmed_day, krx_calendar
 from backend.stock_master import fetch_stocks
 
 
 LIVE = "https://openapi.koreainvestment.com:9443"
 VIRTUAL = "https://openapivts.koreainvestment.com:29443"
 DOMESTIC = "/uapi/domestic-stock/v1"
-ZERO = Decimal(0)
 RETRY_DELAYS = (0.25, 0.5, 1)
 logger = logging.getLogger(__name__)
-
-
-class BrokerError(RuntimeError):
-    pass
-
-
-class BrokerConfigurationError(BrokerError):
-    def __init__(self, code: str, mode: str):
-        self.code = code
-        self.mode = mode
-        super().__init__(f"{code} ({mode})")
-
-
-class RetryableBrokerError(BrokerError):
-    pass
 
 
 @dataclass(frozen=True)
@@ -69,186 +57,6 @@ class BrokerSettings:
         if mode not in {"true", "false"}:
             raise ValueError("IS_VIRTUAL must be true or false")
         return cls(credentials("KIS_"), credentials("KIS_VIRTUAL_"), mode == "true")
-
-
-@dataclass(frozen=True)
-class Holding:
-    stock_code: str
-    name: str
-    asset_type: str | None
-    corp_code: str | None
-    isin_cd: str | None
-    quantity: Decimal
-    average_price: Decimal
-    current_price: Decimal
-    purchase_amount: Decimal
-    market_value: Decimal
-    profit_loss: Decimal
-    profit_loss_pct: Decimal
-    weight: Decimal
-
-
-@dataclass(frozen=True)
-class Balance:
-    cash_deposit: Decimal | None
-    total_value: Decimal
-    cash_weight: Decimal | None
-    holdings: tuple[Holding, ...]
-
-
-@dataclass(frozen=True)
-class Quote:
-    stock_code: str
-    current_price: Decimal
-    source: str
-    session: date | None = None
-    change_pct: Decimal | None = None
-
-
-@dataclass(frozen=True)
-class DailyBar:
-    session: date
-    open: Decimal
-    high: Decimal
-    low: Decimal
-    close: Decimal
-    volume: Decimal
-
-
-@dataclass
-class Candle:
-    time: date | int
-    open: Decimal
-    high: Decimal
-    low: Decimal
-    close: Decimal
-    volume: Decimal
-
-
-@dataclass(frozen=True)
-class InvestorFlow:
-    session: date
-    foreign_net_buy: Decimal
-    institution_net_buy: Decimal
-
-
-@dataclass(frozen=True)
-class FiveDayFlow:
-    days: tuple[InvestorFlow, ...]
-    foreign_net_buy: Decimal
-    institution_net_buy: Decimal
-
-    @property
-    def as_of(self) -> date:
-        return self.days[-1].session
-
-
-def number(value) -> Decimal:
-    parsed = Decimal(str(value).strip().replace(",", ""))
-    if not parsed.is_finite():
-        raise ValueError("Non-finite broker number")
-    return parsed
-
-
-def candle_values(row, close_field, volume_field):
-    try:
-        values = tuple(number(row[field]) for field in (
-            "stck_oprc", "stck_hgpr", "stck_lwpr", close_field, volume_field,
-        ))
-    except (KeyError, ValueError, DecimalException):
-        return None
-    if min(values[:4]) > ZERO and values[4] >= ZERO:
-        return values
-
-
-def candle_period_start(session: date, period: str) -> date:
-    if period == "Y":
-        return session.replace(month=1, day=1)
-    if period == "W":
-        return session - timedelta(days=session.weekday())
-    return session
-
-
-def aggregate_ten_minute_candles(rows) -> list[Candle]:
-    candles: dict[int, Candle] = {}
-    for stamp, (open_, high, low, close, volume) in sorted(rows.items()):
-        bucket = stamp // 600 * 600
-        candle = candles.get(bucket)
-        if candle is None:
-            candles[bucket] = Candle(bucket, open_, high, low, close, volume)
-        else:
-            candle.high = max(candle.high, high)
-            candle.low = min(candle.low, low)
-            candle.close = close
-            candle.volume += volume
-    return list(candles.values())
-
-
-def symbol(code: str) -> str:
-    code = code.strip()
-    if len(code) == 7 and code[0] in {"A", "Q"}:
-        return code[1:]
-    return code
-
-
-def day_string(value: date) -> str:
-    return value.strftime("%Y%m%d")
-
-
-def master_identity(stock) -> tuple[str | None, str | None, str | None]:
-    """Holding identifiers from a stock_master row; all None for an unmapped security."""
-    if stock is None:
-        return None, None, None
-    return stock.asset_type, stock.corp_code, stock.isin_cd
-
-
-class PykrxMarketData:
-    """Synchronous adapter. BrokerConnector runs its calls off the event loop."""
-
-    _login_lock = threading.Lock()
-
-    def keep_session(self, margin=0):
-        """Log in to KRX once, serialized, and renew it when fewer than margin seconds remain."""
-        from pykrx.website.comm import auth
-
-        with self._login_lock:
-            session = auth.get_auth_session()
-            if session is not None and session.expiry_time - wall_clock.time() < margin:
-                session.refresh(os.getenv("KRX_ID"), os.getenv("KRX_PW"))
-
-    def daily(self, code, start, end, asset_type=None, *, adjusted=False):
-        from pykrx import stock
-
-        self.keep_session()
-
-        args = (day_string(start), day_string(end), code)
-        if asset_type == "ETF" and not adjusted:
-            frame = stock.get_etf_ohlcv_by_date(*args)
-        else:
-            # PyKRX's adjusted route uses Naver, which accepts ETN tickers.
-            frame = stock.get_market_ohlcv_by_date(*args, adjusted=adjusted or asset_type == "ETN")
-        if frame.empty:
-            return ()
-        columns = ["시가", "고가", "저가", "종가", "거래량"]
-        return tuple(DailyBar(index.date(), *(number(value) for value in values))
-                     for index, *values in frame[columns].itertuples(name=None))
-
-    def flow(self, code, start, end, asset_type=None):
-        from pykrx import stock
-
-        self.keep_session()
-
-        args = (day_string(start), day_string(end), code)
-        if asset_type in {"ETF", "ETN"}:
-            frame = stock.get_etf_trading_volume_and_value(*args, "거래량", "순매수")
-            columns = ["외국인", "기관"]
-        else:
-            frame = stock.get_market_trading_volume_by_date(*args)
-            columns = ["외국인합계", "기관합계"]
-        if frame.empty:
-            return ()
-        return tuple(InvestorFlow(index.date(), number(foreign), number(institution))
-                     for index, foreign, institution in frame[columns].itertuples(name=None))
 
 
 class BrokerConnector:
