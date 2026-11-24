@@ -1,4 +1,4 @@
-import { fetchBackend, hasValidPin, privateResponse } from "../../../lib/backend-proxy.ts";
+import { fetchBackend, hasValidPin, isJson, privateResponse } from "../../../lib/backend-proxy.ts";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -26,13 +26,13 @@ export async function GET(request: Request): Promise<Response> {
 
   try {
     const upstream = await fetchBackend(request, "/api/v1/account");
-    const isJson = upstream.headers.get("Content-Type")?.split(";")[0].trim() === "application/json";
-    if (upstream.ok && upstream.body && isJson) {
+    const json = isJson(upstream);
+    if (upstream.ok && upstream.body && json) {
       return new Response(upstream.body, {
         headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
       });
     }
-    if (upstream.status === 503 && isJson) {
+    if (upstream.status === 503 && json) {
       const problem: { code?: unknown; mode?: unknown } | null = await upstream.json().catch(() => null);
       if (problem?.code === "kis_account_not_configured" &&
           (problem.mode === "live" || problem.mode === "virtual")) {
