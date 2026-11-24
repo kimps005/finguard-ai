@@ -115,6 +115,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-reload", action="store_true", help="disable backend auto-reload")
     parser.add_argument("--api-only", action="store_true", help="run only the FastAPI server")
     args = parser.parse_args(argv)
+    # Child output is UTF-8; a cp949 Windows console must not crash the log relay.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
     env_file = ROOT / ".env"
     if not env_file.exists():
