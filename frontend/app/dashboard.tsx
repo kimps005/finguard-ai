@@ -2,13 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import {
-  Activity, ArrowRight, ArrowUpRight, Check, CircleAlert, FileText,
-  Globe2, Layers3, LoaderCircle, LockKeyhole, Send, ShieldCheck, Wallet,
+  ArrowRight, Check, CircleAlert, Globe2, LoaderCircle, LockKeyhole, ShieldCheck, Wallet, X,
 } from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { readChatEvents, type AccountSnapshot, type DecimalString, type Scorecards, type Status } from "../lib/chat-stream";
-import PriceOutlook from "./price-outlook";
+import {
+  readChatEvents, type AccountSnapshot, type DecimalString, type Scorecards, type Status, type StockSearchResult,
+} from "../lib/chat-stream";
+import PriceOutlook, { WATCHLIST } from "./price-outlook";
 
 const PIN_KEY = "finguard-app-pin";
 const PIN_HEADER = "X-App-Pin";
@@ -64,7 +65,7 @@ function questionTopic(question: string, holdings: AccountSnapshot["holdings"]) 
     [/전략|대응|매도/u, "대응 전략"],
   ] as const;
   const keywords = topics.filter(([pattern]) => pattern.test(question)).slice(0, 2).map(([, label]) => label);
-  return [subject, ...keywords].filter(Boolean).join(" · ") || "포트폴리오 진단";
+  return [subject, ...keywords].filter(Boolean).join(", ") || "포트폴리오 진단";
 }
 
 function AnalysisProgress({ statuses, holdings, elapsed }: {
@@ -72,37 +73,46 @@ function AnalysisProgress({ statuses, holdings, elapsed }: {
   holdings: AccountSnapshot["holdings"];
   elapsed: number | null;
 }) {
+  const steps = statuses.map((status) => ({ phase: status.phase, label: describeTask(status, holdings) }));
+  const timeline = steps.length > 0 && (
+    <ol className="timeline">
+      {steps.map(({ phase, label }, index) => (
+        <li key={`${label}-${index}`} data-phase={phase}>
+          <span className="timeline-dot" aria-hidden="true">
+            {phase === "completed" && <Check size={11} strokeWidth={3} />}
+            {phase === "failed" && <X size={11} strokeWidth={3} />}
+          </span>
+          <span className="timeline-label">{label}</span>
+          <span className="sr-only">{phase === "started" ? "진행 중" : phase === "failed" ? "실패" : "완료"}</span>
+        </li>
+      ))}
+    </ol>
+  );
+
   if (elapsed !== null) {
     const seconds = Math.max(1, Math.round(elapsed / 1000));
     const duration = seconds < 60 ? `${seconds}초` : `${Math.floor(seconds / 60)}분 ${seconds % 60}초`;
     return (
-      <div className="progress-complete" role="status">
-        <span className="completion-icon"><Check size={17} aria-hidden="true" /></span>
-        <span>분석 완료</span>
-        <span className="duration">{duration}</span>
-      </div>
+      <details className="progress progress-done">
+        <summary>
+          <span className="done-icon" aria-hidden="true"><Check size={12} strokeWidth={3} /></span>
+          <span role="status">{duration} 만에 분석을 마쳤습니다</span>
+          {steps.length > 0 && <span className="progress-toggle">단계 {steps.length}개 보기</span>}
+        </summary>
+        {timeline}
+      </details>
     );
   }
 
-  const active = statuses.filter((status) => status.phase === "started").reverse();
-  const current = active[0] ?? statuses[statuses.length - 1];
-  const related = [...new Set(active.slice(1).map((status) => describeTask(status, holdings)))];
-  const currentTitle = current ? describeTask(current, holdings) : stageNames.router_node;
-  const title = active.length || !current ? `${currentTitle} 중` : `${currentTitle} ${current.phase === "failed" ? "실패" : "완료"}`;
+  const current = statuses.filter((status) => status.phase === "started").at(-1) ?? statuses.at(-1);
+  const title = current ? describeTask(current, holdings) : stageNames.router_node;
   return (
-    <div className="live-progress">
-      <div className="live-stage">
-        <span className="radar" aria-hidden="true"><span className="animate-ping motion-reduce:animate-none" /></span>
-        <div className="min-w-0" role="status">
-          <p className="live-label">실시간 분석</p>
-          <p className="live-title">{title}</p>
-          {related.some((detail) => detail !== currentTitle) && (
-            <ul className="live-tasks">
-              {related.filter((detail) => detail !== currentTitle).map((detail) => <li key={detail}>{detail} 중</li>)}
-            </ul>
-          )}
-        </div>
-      </div>
+    <div className="progress progress-live">
+      <p className="progress-title" role="status">
+        <span className="pulse" aria-hidden="true" />
+        {title}
+      </p>
+      {timeline}
       <div className="progress-track" aria-hidden="true" />
     </div>
   );
@@ -138,6 +148,7 @@ export default function Dashboard() {
   const [accountError, setAccountError] = useState("");
   const [scores, setScores] = useState<Scorecards>({});
   const [simulationCode, setSimulationCode] = useState("");
+  const [stock, setStock] = useState<StockSearchResult>(WATCHLIST[0]);
   const [query, setQuery] = useState("");
   const [topic, setTopic] = useState("");
   const [running, setRunning] = useState(false);
@@ -169,6 +180,7 @@ export default function Dashboard() {
     setAccountError("");
     setScores({});
     setSimulationCode("");
+    setStock(WATCHLIST[0]);
     setQuery("");
     setTopic("");
     setReport("");
@@ -325,50 +337,71 @@ export default function Dashboard() {
     ?? holdingOptions.find((holding) => holding.profit_loss_pct.startsWith("-"))
     ?? holdingOptions[0];
 
+  const quickActions = [
+    {
+      key: "risk", icon: ShieldCheck, title: "종합 리스크 점검", disabled: false,
+      description: "비중 상위 종목의 공시·오버행·수급",
+      run: () => analyze("내 계좌의 종합 리스크를 스캔해 줘. 보유 비중 상위 종목의 공시, 오버행, 수급을 함께 진단해 줘.", "종합 리스크 점검"),
+    },
+    {
+      key: "simulation", icon: Wallet, title: "추가매수 시뮬레이션", disabled: !simulationHolding,
+      description: simulationHolding ? `${simulationHolding.name}, 매수 가능 금액의 40%` : "보유 종목이 있어야 합니다",
+      run: () => simulationHolding && analyze(`${simulationHolding.stock_code} 종목을 주문 가능 현금의 40%로 추가매수하면 예상 평단가와 비중이 어떻게 바뀌는지 물타기 시뮬레이션해 줘.`, `${simulationHolding.name} 추가매수 시뮬레이션`),
+    },
+    {
+      key: "macro", icon: Globe2, title: "환율·금리 영향", disabled: false,
+      description: "원/달러 환율과 금리가 계좌에 주는 영향",
+      run: () => analyze("최근 원/달러 환율과 금리 변화가 내 포트폴리오에 어떤 영향을 주는지 매크로 진단해 줘.", "환율·금리 영향"),
+    },
+  ];
+  const ownedCodes = new Set(holdingOptions.map(({ stock_code }) => stock_code));
+  const watchlist = WATCHLIST.filter(({ stock_code }) => !ownedCodes.has(stock_code));
+
   return (
     <>
       <header className="topbar">
-        <div className="shell flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <span className="brand-icon"><ShieldCheck size={20} /></span>
-            <span className="brand">FinGuard <span>AI</span></span>
-          </div>
-          {pin && <button className="lock-button" onClick={() => lock()}><LockKeyhole size={15} /> 잠그기</button>}
+        <div className="shell topbar-inner">
+          <span className="brand">
+            <span className="brand-mark" aria-hidden="true"><ShieldCheck size={16} strokeWidth={2.4} /></span>
+            FinGuard
+          </span>
+          {pin && <button type="button" className="ghost-button" onClick={() => lock()}>
+            <LockKeyhole size={14} aria-hidden="true" /> 잠그기
+          </button>}
         </div>
       </header>
       {!pin ? (
         <main className="lock-page">
-          <form className="panel lock-panel" onSubmit={submitPin}>
-            <span className="section-icon"><LockKeyhole size={23} /></span>
+          <form className="lock-card" onSubmit={submitPin}>
             <h1>대시보드 잠금 해제</h1>
-            <p className="muted">대시보드를 열려면 접근 PIN을 입력하세요.</p>
+            <p>계좌 정보를 보려면 접근 PIN을 입력하세요.</p>
             <label htmlFor="pin">접근 PIN</label>
             <input id="pin" type="password" value={pinInput} onChange={(event) => setPinInput(event.target.value)}
-              placeholder="PIN 입력" autoComplete="off" maxLength={128} required />
-            {accessError && <p className="error" role="alert">{accessError}</p>}
+              autoComplete="off" maxLength={128} required autoFocus aria-describedby={accessError ? "pin-error" : undefined} />
+            {accessError && <p id="pin-error" className="inline-error" role="alert">{accessError}</p>}
             <button className="primary-button" disabled={checking || !pinInput.trim()}>
-              {checking ? "확인 중" : "잠금 해제"} {checking ? <LoaderCircle size={16} className="animate-spin motion-reduce:animate-none" /> : <ArrowRight size={16} />}
+              {checking ? <><LoaderCircle size={16} className="animate-spin motion-reduce:animate-none" aria-hidden="true" /> 확인 중</>
+                : <>잠금 해제 <ArrowRight size={16} aria-hidden="true" /></>}
             </button>
           </form>
         </main>
       ) : (
-        <main className="shell dashboard">
-          <PriceOutlook pin={pin} pinHeader={PIN_HEADER} holdings={holdingOptions} onUnauthorized={lock} />
-          {accountError && <p className="outlook-note mb-4" role="status">{accountError}</p>}
-          <div className={summary ? "dashboard-grid" : undefined}>
-            {summary && <aside className="min-w-0 space-y-5" aria-label="계좌와 보유 종목">
-              <section className="panel account-panel" aria-labelledby="account-title">
-                <h2 id="account-title"><Wallet size={17} /> 계좌 요약</h2>
+        <main className="shell workspace">
+          <aside className="rail" aria-label="계좌와 종목">
+            <section className="account" aria-labelledby="account-title">
+              <h2 id="account-title" className="sr-only">계좌 요약</h2>
+              {summary ? (
                 <dl>
                   <div className="account-total">
                     <dt>{summary.cash_deposit === null ? "국내 주식 평가액" : "총 평가액"}</dt>
-                    <dd>{won.format(summary.total_value)}<small>원</small></dd>
+                    <dd>
+                      <span className="account-amount">{won.format(summary.total_value)}<small>원</small></span>
+                      {accountChange && <span className="delta" data-direction={accountChange.direction}
+                        aria-label={`평가손익률 ${accountChange.text}`}>{accountChange.text}</span>}
+                    </dd>
                   </div>
-                  {accountChange && <div className="account-return">
-                    <dt>평가손익률</dt><dd className="return-badge" data-direction={accountChange.direction}>{accountChange.text}</dd>
-                  </div>}
                   {(summary.orderable_cash !== null || summary.cash_weight !== null) && (
-                    <div className="account-cash">
+                    <div className="account-facts">
                       {summary.orderable_cash !== null && (
                         <div><dt>매수 가능 금액</dt><dd>{won.format(summary.orderable_cash)}원</dd></div>
                       )}
@@ -378,100 +411,135 @@ export default function Dashboard() {
                     </div>
                   )}
                 </dl>
-              </section>
-              <section className="panel holdings-panel" aria-labelledby="holdings-title">
-                <div className="section-heading">
-                  <h2 id="holdings-title"><Layers3 size={19} /> 보유 종목</h2>
-                  <span className="muted text-sm">{holdingOptions.length}종목</span>
+              ) : accountError ? (
+                <p className="inline-error" role="alert">{accountError}</p>
+              ) : (
+                <div className="account-loading" role="status">
+                  <span className="skeleton skeleton-label" /><span className="skeleton skeleton-amount" />
+                  <span className="sr-only">계좌 정보를 불러오는 중입니다.</span>
                 </div>
-                {holdingOptions.length === 0 ? <p className="empty-holdings muted">보유 종목이 없습니다.</p> : (
+              )}
+            </section>
+
+            {summary && (
+              <section className="stock-list" aria-labelledby="holdings-title">
+                <h2 id="holdings-title">보유 종목 <span>{holdingOptions.length}</span></h2>
+                {holdingOptions.length === 0 ? <p className="stock-list-empty">보유 종목이 없습니다. 아래 관심 종목이나 검색으로 가격 구간을 확인하세요.</p> : (
                   <ul>
                     {holdingOptions.map((holding) => {
                       const change = holdingReturn(holding.profit_loss_pct);
-                      const card = scores[holding.stock_code];
-                      const score = holding.asset_type === "STOCK" ? card?.total : null;
+                      const score = holding.asset_type === "STOCK" ? scores[holding.stock_code]?.total : null;
+                      const selectable = /^[0-9A-Z]{6}$/.test(holding.stock_code);
+                      const body = <>
+                        <span className="stock-row-main">
+                          <strong>{holding.name}</strong>
+                          <span className="delta" data-direction={change.direction} aria-label={`평가손익률 ${change.text}`}>{change.text}</span>
+                        </span>
+                        <span className="stock-row-meta">
+                          <span>{holding.stock_code}</span>
+                          <span>평단 {won.format(holding.average_price)}원</span>
+                          {score != null && <span className="score" data-tone={score >= 70 ? "good" : score >= 40 ? "mid" : "low"}>점수 {score}</span>}
+                        </span>
+                      </>;
                       return (
-                        <li key={holding.stock_code} className="holding">
-                          <div className="holding-heading">
-                            <div className="min-w-0">
-                              <h3>{holding.name}</h3>
-                              <span className="ticker">{holding.stock_code}</span>
-                            </div>
-                            <span className="return-badge" data-direction={change.direction} aria-label={`평가손익률 ${change.text}`}>
-                              {change.text}
-                            </span>
-                          </div>
-                          <dl className="holding-metrics">
-                            <div><dt>평단가</dt><dd>{won.format(holding.average_price)}원</dd></div>
-                            {score != null && <div><dt>정량 점수</dt><dd>{score}/100</dd></div>}
-                          </dl>
+                        <li key={holding.stock_code}>
+                          {selectable ? (
+                            <button type="button" className="stock-row" aria-pressed={stock.stock_code === holding.stock_code}
+                              onClick={() => setStock({ stock_code: holding.stock_code, corp_name: holding.name, market: null })}>
+                              {body}
+                            </button>
+                          ) : <div className="stock-row">{body}</div>}
                         </li>
                       );
                     })}
                   </ul>
                 )}
               </section>
-            </aside>}
-            <div className="min-w-0 space-y-5">
-              <section className="panel analysis-panel" aria-labelledby="diagnosis-title">
-                <div className="section-heading"><h2 id="diagnosis-title"><Activity size={19} /> 직접 질문하기</h2></div>
-                <form className="query-form" onSubmit={(event) => {
-                  event.preventDefault();
-                  if (questionDisabled || !query.trim()) return;
-                  void analyze(query);
-                  setQuery("");
-                }}>
-                  <label className="sr-only" htmlFor="query">계좌 진단 질문</label>
-                  <input id="query" maxLength={4000} placeholder="예: 내 계좌의 현재 잔고와 수익률은?" value={query}
-                    onChange={(event) => setQuery(event.target.value)} />
-                  <button className="primary-button" aria-label="질문 보내기" disabled={questionDisabled || !query.trim()}><Send size={17} /></button>
-                </form>
-                <h3 id="quick-actions-title" className="mt-5 text-sm font-semibold">빠른 진단</h3>
-                <div className="quick-actions" role="group" aria-labelledby="quick-actions-title">
-                  <button type="button" disabled={questionDisabled}
-                    onClick={() => void analyze("내 계좌의 종합 리스크를 스캔해 줘. 보유 비중 상위 종목의 공시, 오버행, 수급을 함께 진단해 줘.", "종합 리스크 스캔")}>
-                    <ShieldCheck size={18} /> 종합 리스크 스캔 <ArrowUpRight className="action-arrow" size={14} />
-                  </button>
-                  <button type="button" disabled={questionDisabled || !simulationHolding}
-                    onClick={() => simulationHolding && void analyze(`${simulationHolding.stock_code} 종목을 주문 가능 현금의 40%로 추가매수하면 예상 평단가와 비중이 어떻게 바뀌는지 물타기 시뮬레이션해 줘.`, `${simulationHolding.name} · 추가매수 시뮬레이션`)}>
-                    <Wallet size={18} /> 추가매수 시뮬레이션 <ArrowUpRight className="action-arrow" size={14} />
-                  </button>
-                  <button type="button" disabled={questionDisabled}
-                    onClick={() => void analyze("최근 원/달러 환율과 금리 변화가 내 포트폴리오에 어떤 영향을 주는지 매크로 진단해 줘.", "환율·금리 영향")}>
-                    <Globe2 size={18} /> 매크로 환율 진단 <ArrowUpRight className="action-arrow" size={14} />
-                  </button>
-                </div>
-                {simulationHolding && (
-                  <div className="simulation-options">
-                    <label htmlFor="simulation-stock">추가매수 대상</label>
-                    <select id="simulation-stock" value={simulationHolding.stock_code} disabled={questionDisabled}
-                      onChange={(event) => setSimulationCode(event.target.value)}>
-                      {holdingOptions.map((holding) => <option key={holding.stock_code} value={holding.stock_code}>{holding.name}</option>)}
-                    </select>
-                    <span>주문 가능 현금의 40%</span>
-                  </div>
-                )}
-                {(running || elapsed !== null) && (
-                  <AnalysisProgress statuses={Object.values(statuses)} holdings={holdingOptions} elapsed={elapsed} />
-                )}
+            )}
+
+            {watchlist.length > 0 && (
+              <section className="stock-list" aria-labelledby="watchlist-title">
+                <h2 id="watchlist-title">관심 종목</h2>
+                <ul>
+                  {watchlist.map((item) => (
+                    <li key={item.stock_code}>
+                      <button type="button" className="stock-row" aria-pressed={stock.stock_code === item.stock_code}
+                        onClick={() => setStock(item)}>
+                        <span className="stock-row-main"><strong>{item.corp_name}</strong></span>
+                        <span className="stock-row-meta"><span>{item.stock_code}</span>{item.market && <span>{item.market}</span>}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
               </section>
-              {topic && <section className="panel analysis-panel" aria-labelledby="report-title" aria-busy={running}>
-                <div className="section-heading report-heading">
-                  <h2 id="report-title"><FileText size={19} /> 진단 리포트</h2>
-                  <p className="report-topic" title={topic}>{topic}</p>
+            )}
+          </aside>
+
+          <div className="main-column">
+            {summary && accountError && <p className="inline-note" role="status">{accountError}</p>}
+            <PriceOutlook pin={pin} pinHeader={PIN_HEADER} stock={stock} onStockChange={setStock} onUnauthorized={lock} />
+
+            <section className="sheet diagnosis" aria-labelledby="diagnosis-title" aria-busy={running}>
+              <div className="block-head">
+                <h2 id="diagnosis-title">AI 계좌 진단</h2>
+                <p>보유 종목의 공시·재무·수급을 근거와 함께 분석합니다.</p>
+              </div>
+              <form className="ask" onSubmit={(event) => {
+                event.preventDefault();
+                if (questionDisabled || !query.trim()) return;
+                void analyze(query);
+                setQuery("");
+              }}>
+                <label className="sr-only" htmlFor="query">계좌 진단 질문</label>
+                <input id="query" maxLength={4000} placeholder="예: 손실 중인 종목을 계속 들고 가도 될까?" value={query}
+                  onChange={(event) => setQuery(event.target.value)} />
+                <button className="primary-button" disabled={questionDisabled || !query.trim()}>
+                  {running ? <LoaderCircle size={16} className="animate-spin motion-reduce:animate-none" aria-hidden="true" /> : null}
+                  {running ? "분석 중" : "질문하기"}
+                </button>
+              </form>
+
+              <div className="quick-actions" role="group" aria-label="자주 쓰는 진단">
+                {quickActions.map(({ key, icon: Icon, title, description, disabled, run }) => (
+                  <button key={key} type="button" disabled={questionDisabled || disabled} onClick={() => void run()}>
+                    <Icon size={17} aria-hidden="true" />
+                    <span><strong>{title}</strong><span>{description}</span></span>
+                  </button>
+                ))}
+              </div>
+              {holdingOptions.length > 1 && (
+                <div className="simulation-target">
+                  <label htmlFor="simulation-stock">시뮬레이션 종목</label>
+                  <select id="simulation-stock" value={simulationHolding?.stock_code} disabled={questionDisabled}
+                    onChange={(event) => setSimulationCode(event.target.value)}>
+                    {holdingOptions.map((holding) => <option key={holding.stock_code} value={holding.stock_code}>{holding.name}</option>)}
+                  </select>
                 </div>
-                {analysisError && <p className="error" role="alert">{analysisError}</p>}
-                {report && <ReportBody report={report} />}
-                {warnings.length > 0 && (
-                  <div className="warning" role="alert">
-                    <CircleAlert size={18} />
-                    <div><strong>검증 참고사항</strong>
-                      <ul>{warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>
-                    </div>
+              )}
+
+              {topic ? (
+                <div className="report" aria-labelledby="report-title">
+                  <div className="report-head">
+                    <h2 id="report-title">{topic}</h2>
                   </div>
-                )}
-              </section>}
-            </div>
+                  {(running || elapsed !== null) && (
+                    <AnalysisProgress statuses={Object.values(statuses)} holdings={holdingOptions} elapsed={elapsed} />
+                  )}
+                  {analysisError && <p className="inline-error" role="alert">{analysisError}</p>}
+                  {report && <ReportBody report={report} />}
+                  {warnings.length > 0 && (
+                    <div className="callout" role="note">
+                      <CircleAlert size={17} aria-hidden="true" />
+                      <div><strong>검증 참고사항</strong>
+                        <ul>{warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="diagnosis-empty">질문을 입력하거나 위 진단 중 하나를 고르면, 진행 단계와 리포트가 여기에 표시됩니다.</p>
+              )}
+            </section>
           </div>
         </main>
       )}

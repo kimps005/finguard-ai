@@ -7,8 +7,12 @@ import {
 } from "lightweight-charts";
 import type { StockPriceBand } from "../lib/chat-stream";
 
-const red = "#F04452";
-const blue = "#3182F6";
+// Mirrors the --up / --down / --muted tokens in globals.css (Korean convention: red rises, blue falls).
+const red = "#D92D3A";
+const blue = "#2F64D8";
+const neutral = "#7D8592";
+const grid = "#EEF0F3";
+const axis = "#8A919C";
 const won = new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 2 });
 const seoul = { timeZone: "Asia/Seoul" };
 const clock = new Intl.DateTimeFormat("ko-KR", { ...seoul, hourCycle: "h23", hour: "2-digit", minute: "2-digit" });
@@ -60,12 +64,13 @@ export default function TossTenMinuteChart({ stockCode, band, pin, pinHeader, on
     if (!element) return;
     const instance = createChart(element, {
       autoSize: true,
-      layout: { background: { type: ColorType.Solid, color: "#FFFFFF" }, textColor: "#8B95A1",
-        fontFamily: "Arial, sans-serif", fontSize: 12, attributionLogo: true },
-      grid: { horzLines: { color: "#F2F4F6" }, vertLines: { color: "#F2F4F6" } },
-      crosshair: { mode: CrosshairMode.Normal, vertLine: { color: "#8B95A1" }, horzLine: { color: "#8B95A1" } },
-      rightPriceScale: { borderColor: "#F2F4F6", scaleMargins: { top: 0.13, bottom: 0.13 } },
-      timeScale: { borderColor: "#F2F4F6", secondsVisible: false,
+      layout: { background: { type: ColorType.Solid, color: "#FFFFFF" }, textColor: axis,
+        fontFamily: getComputedStyle(element).fontFamily, fontSize: 11, attributionLogo: true },
+      grid: { horzLines: { color: grid }, vertLines: { visible: false } },
+      crosshair: { mode: CrosshairMode.Normal,
+        vertLine: { color: axis, labelBackgroundColor: "#1B2330" }, horzLine: { color: axis, labelBackgroundColor: "#1B2330" } },
+      rightPriceScale: { borderVisible: false, scaleMargins: { top: 0.12, bottom: 0.12 } },
+      timeScale: { borderColor: grid, secondsVisible: false,
         barSpacing: 10, minBarSpacing: 7, maxBarSpacing: 13, rightOffset: 4 },
     });
     chart.current = instance;
@@ -101,9 +106,9 @@ export default function TossTenMinuteChart({ stockCode, band, pin, pinHeader, on
     const candleSeries = series.current;
     if (!candleSeries) return;
     const levels = [
-      { title: "여기서 사라", price: Number(buy), color: blue },
-      { title: "여기서 팔아라", price: Number(sell), color: red },
-      { title: "단기 고점", price: Number(peak), color: "#F59E0B" },
+      { title: "매수", price: Number(buy), color: blue },
+      { title: "매도", price: Number(sell), color: red },
+      { title: "상단", price: Number(peak), color: neutral },
     ].filter(({ price }) => Number.isFinite(price) && price > 0);
     candleSeries.applyOptions({
       autoscaleInfoProvider: (base: () => AutoscaleInfo | null) => {
@@ -207,39 +212,40 @@ export default function TossTenMinuteChart({ stockCode, band, pin, pinHeader, on
     };
   }, [stockCode, interval, pin, pinHeader, onUnauthorized]);
 
+  const live = interval === "10m" && !failed;
   return (
-    <section className="outlook-chart rounded-2xl bg-white tabular-nums" aria-label="종목 가격 차트">
-      <div className="outlook-chart-header">
-        <div className="inline-flex gap-0.5 rounded-xl bg-[#F2F4F6] p-1" role="group" aria-label="봉 간격">
+    <section className="chart" aria-label="가격 차트">
+      <div className="chart-head">
+        <div className="segmented" role="group" aria-label="봉 간격">
           {intervals.map(([value, label]) => (
-            <button key={value} type="button" aria-pressed={value === interval} onClick={() => setInterval(value)}
-              className={`whitespace-nowrap rounded-lg px-2.5 py-1.5 font-semibold transition-colors focus-visible:outline-[#3182F6] ${
-                value === interval ? "bg-white text-[#191F28] shadow-sm" : "text-[#6B7684] hover:text-[#191F28]"
-              }`}>
+            <button key={value} type="button" aria-pressed={value === interval} onClick={() => setInterval(value)}>
               {label}
             </button>
           ))}
         </div>
-        {latest && <p className="outlook-chart-quote">
-          {failed || interval !== "10m" ? "최근 종가" : "현재가"} <strong>{won.format(latest.close)}원</strong>
+        {latest && <p className="chart-quote">
+          <span className="chart-state" data-live={live}>{live ? "실시간" : "최근 종가"}</span>
+          <strong>{won.format(latest.close)}<small>원</small></strong>
         </p>}
       </div>
-      <div className="outlook-chart-details">
+      <dl className="chart-ohlc" aria-live="off">
         {hovered && <>
-          <time dateTime={new Date(hovered.time * 1000).toISOString()}>
-            {(interval === "10m" ? timestamp : sessionDate).format(hovered.time * 1000)}
-          </time>
+          <div className="chart-ohlc-time"><dt className="sr-only">시각</dt><dd>
+            <time dateTime={new Date(hovered.time * 1000).toISOString()}>
+              {(interval === "10m" ? timestamp : sessionDate).format(hovered.time * 1000)}
+            </time>
+          </dd></div>
           {([["시가", hovered.open], ["고가", hovered.high], ["저가", hovered.low], ["종가", hovered.close]] as const)
-            .map(([label, value]) => <span key={label}>{label} <strong>{won.format(value)}원</strong></span>)}
+            .map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{won.format(value)}</dd></div>)}
         </>}
-      </div>
-      <div className="outlook-chart-plot">
-        <div className="outlook-chart-canvas" ref={container} />
-        {!latest && <p className="z-10 bg-white/80 text-sm text-[#6B7684]" role="status">
-          {failed ? "가격 차트를 불러올 수 없습니다." : "차트 데이터를 불러오는 중입니다..."}
+      </dl>
+      <div className="chart-plot">
+        <div className="chart-canvas" ref={container} />
+        {!latest && <p className="chart-overlay" role="status">
+          {failed ? interval === "10m" ? "가격 차트를 불러올 수 없습니다. 잠시 후 자동으로 다시 시도합니다." : "가격 차트를 불러올 수 없습니다. 다른 봉 간격을 선택해 보세요." : "차트를 불러오는 중입니다."}
         </p>}
       </div>
-      {failed && latest && <p className="outlook-note" role="status">가격 갱신이 지연되고 있습니다.</p>}
+      {failed && latest && <p className="inline-note" role="status">가격 갱신이 지연되고 있습니다. 마지막으로 받은 가격을 표시합니다.</p>}
     </section>
   );
 }
