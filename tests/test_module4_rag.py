@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import date
 from decimal import Decimal
 from io import BytesIO
@@ -300,3 +301,32 @@ def test_failed_embedding_rolls_back_entire_receipt_and_can_retry(db, monkeypatc
     assert db.execute("SELECT count(*) FROM dart_chunks").fetchone() == (0,)
     run(service._index_report(CORP, report))
     assert db.execute("SELECT count(*) FROM dart_chunks").fetchone() == (9,)
+
+
+def test_embedding_runs_without_holding_a_database_connection(db, monkeypatch):
+    archive = BytesIO()
+    with ZipFile(archive, "w") as package:
+        package.writestr("filing.xml", "<p>전환사채 발행 결정</p>")
+    service = etl.DartETL(None, None, "test")
+    monkeypatch.setattr(service, "_request", AsyncMock(return_value=archive.getvalue()))
+    monkeypatch.setattr(rag, "keywords", AsyncMock(return_value=["전환"]))
+    open_connections = []
+    connection = etl.db.connection
+
+    @asynccontextmanager
+    async def tracked(**kwargs):
+        open_connections.append(1)
+        try:
+            async with connection(**kwargs) as conn:
+                yield conn
+        finally:
+            open_connections.pop()
+
+    async def embed(texts):
+        assert not open_connections, "GPU inference must not run inside a DB transaction"
+        return [VECTOR] * len(texts)
+
+    monkeypatch.setattr(etl.db, "connection", tracked)
+    monkeypatch.setattr(rag, "embed", embed)
+    run(service._index_report(CORP, {"rcept_no": RECEIPT, "rcept_dt": "20260115", "report_nm": "발행결정"}))
+    assert db.execute("SELECT count(*) FROM dart_chunks").fetchone() == (1,)

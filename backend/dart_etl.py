@@ -227,17 +227,19 @@ class DartETL:
         data = await self._request("document.xml", rcept_no=receipt)
         chunks = await asyncio.to_thread(_document_chunks, data)
         report_date = date.fromisoformat(report["rcept_dt"])
-        # One transaction per receipt. A failed batch leaves no partial searchable filing.
+        # Embed before opening a transaction. GPU inference is serialized and slow, and a
+        # pooled connection must not sit idle in a transaction while it waits.
+        rows = []
+        for start in range(0, len(chunks), dart_rag.BATCH_SIZE):
+            batch = chunks[start:start + dart_rag.BATCH_SIZE]
+            vectors = await dart_rag.embed(batch)
+            for i, (text, vector) in enumerate(zip(batch, vectors, strict=True), start):
+                tokens = await dart_rag.keywords(text)
+                rows.append((corp_code, receipt, i, report["report_nm"], report_date,
+                             text, json.dumps(vector, allow_nan=False), " ".join(tokens)))
+        # One transaction per receipt. A failed embedding or insert leaves no partial searchable filing.
         async with db.connection() as conn, conn.cursor() as cursor:
-            for start in range(0, len(chunks), dart_rag.BATCH_SIZE):
-                batch = chunks[start:start + dart_rag.BATCH_SIZE]
-                vectors = await dart_rag.embed(batch)
-                rows = []
-                for i, (text, vector) in enumerate(zip(batch, vectors, strict=True), start):
-                    tokens = await dart_rag.keywords(text)
-                    rows.append((corp_code, receipt, i, report["report_nm"], report_date,
-                                 text, json.dumps(vector, allow_nan=False), " ".join(tokens)))
-                await cursor.executemany(INSERT_CHUNK, rows)
+            await cursor.executemany(INSERT_CHUNK, rows)
 
 
 def migrate():
