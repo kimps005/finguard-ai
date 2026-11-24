@@ -4,7 +4,6 @@ import asyncio
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
 from decimal import Decimal
-import json
 import logging
 
 from psycopg.rows import dict_row
@@ -49,9 +48,7 @@ async def financial_reports(etl: DartETL, corp_code: str, on: date) -> DartRepor
     reports = {}
 
     async def load(year, period, basis):
-        raw = await etl._request("fnlttSinglAcntAll.json", corp_code=corp_code,
-                                 bsns_year=str(year), reprt_code=period, fs_div=basis)
-        reports[year, period, basis] = json.loads(raw, parse_float=Decimal)
+        reports[year, period, basis] = await etl.financial_statement(corp_code, year, period, basis)
 
     for year in (on.year - 1, on.year - 2):
         for basis in ("CFS", "OFS"):

@@ -154,6 +154,12 @@ class DartETL:
             raise RuntimeError(f"DART {endpoint} returned HTTP {response.status_code}")
         return response.content
 
+    async def financial_statement(self, corp_code: str, year: int, period: str, basis: str) -> dict:
+        """One fnlttSinglAcntAll response ({"status", "list"}) with amounts as Decimal."""
+        raw = await self._request("fnlttSinglAcntAll.json", corp_code=corp_code, bsns_year=str(year),
+                                  reprt_code=period, fs_div=basis)
+        return json.loads(raw, parse_float=Decimal)
+
     async def _list(self, endpoint, **params):
         payload = json.loads(await self._request(endpoint, **params), parse_float=Decimal)
         if payload["status"] == "013":
