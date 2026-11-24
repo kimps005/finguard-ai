@@ -17,6 +17,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 FRONTEND = ROOT / "frontend"
@@ -97,6 +98,19 @@ def stop(proc: subprocess.Popen) -> None:
         proc.kill()
 
 
+def source_snapshot(root: Path) -> dict[Path, int]:
+    """Modification times of the backend's Python sources; any difference means restart."""
+    snapshot = {}
+    for path in root.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        try:
+            snapshot[path] = path.stat().st_mtime_ns
+        except FileNotFoundError:  # Deleted between listing and stat.
+            continue
+    return snapshot
+
+
 def spawn(name: str, cmd: list[str], env: dict[str, str], cwd: Path) -> subprocess.Popen:
     options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" \
         else {"start_new_session": True}
@@ -164,19 +178,40 @@ def main(argv: list[str] | None = None) -> int:
 
     step(f"API http://127.0.0.1:{args.api_port}" +
          ("" if args.api_only else f"   Web http://127.0.0.1:{args.web_port}") + "   (Ctrl+C to stop)")
+    # This runner restarts the API itself. Uvicorn's --reload restarts its worker with
+    # CTRL_C_EVENT on Windows, which reaches every process on the console and stopped
+    # this runner, and with it the web server, on the first backend edit.
     api_cmd = [sys.executable, "-m", "backend.server", "--port", str(args.api_port)]
-    procs = [spawn("api", api_cmd if args.no_reload else [*api_cmd, "--reload"], env, ROOT)]
+    backend = ROOT / "backend"
+    watched = None if args.no_reload else source_snapshot(backend)
+    procs = [spawn("api", api_cmd, env, ROOT)]
     if not args.api_only:
         procs.append(spawn("web", [npm, "run", "dev", "--", "--hostname", "127.0.0.1",
                                    "--port", str(args.web_port)], env, FRONTEND))
 
     exit_code = 0
+    api_reported = False
     try:
-        while all(p.poll() is None for p in procs):
+        # With reload on, a crashed API (e.g. a syntax error) waits for the next edit.
+        while all(p.poll() is None for p in (procs[1:] if watched is not None else procs)):
             try:
                 procs[0].wait(timeout=0.5)
             except subprocess.TimeoutExpired:
                 pass
+            if watched is None:
+                continue
+            if procs[0].poll() is not None and not api_reported:
+                print(f"\n[api] exited with code {procs[0].returncode}; waiting for a backend change",
+                      file=sys.stderr, flush=True)
+                api_reported = True
+            current = source_snapshot(backend)
+            if current != watched:
+                time.sleep(0.3)  # Let editors finish multi-step saves.
+                watched = source_snapshot(backend)
+                step("Backend changed; restarting API")
+                stop(procs[0])
+                procs[0] = spawn("api", api_cmd, env, ROOT)
+                api_reported = False
         exited = next(p for p in procs if p.poll() is not None)
         exit_code = exited.returncode or 1
         print(f"\nA server exited with code {exited.returncode}; stopping the rest.", file=sys.stderr)
