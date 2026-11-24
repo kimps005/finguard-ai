@@ -179,7 +179,8 @@ async def run_case(case, *, dry_run):
     tokens = []
     done = None
     # Exercise local fallback without using any configured cloud credentials in a dry run.
-    offline = patch.object(llm, "invoke", AsyncMock(side_effect=llm.LLMUnavailable)) if dry_run else nullcontext()
+    offline = patch.object(llm, "invoke", AsyncMock(side_effect=llm.LLMUnavailable(
+        "Offline evaluation blocks cloud LLM calls", reason="오프라인 평가"))) if dry_run else nullcontext()
     with offline, patch.object(stock_analysis, "analyze", capture):
         async for frame in chat_events(graph, query):
             event, data, *_ = frame.splitlines()
