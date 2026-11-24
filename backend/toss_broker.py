@@ -1,4 +1,9 @@
-"""Read-only domestic account access through the Toss Securities Open API."""
+"""Read-only domestic account access through the Toss Securities Open API.
+
+Toss supplies only the account (holdings and buying power). Quotes, bars and investor
+flows still come from BrokerConnector's KIS live domain with its PyKRX fallback, so
+KIS_APP_KEY/KIS_APP_SECRET remain useful in Toss mode.
+"""
 
 import asyncio
 from dataclasses import dataclass, field
@@ -7,8 +12,7 @@ from hashlib import sha256
 import os
 
 from backend.broker import (
-    ZERO, Balance, BrokerConfigurationError, BrokerConnector, BrokerError,
-    Holding, RetryableBrokerError, master_identity, number,
+    ZERO, Balance, BrokerConfigurationError, BrokerError, Holding, RetryableBrokerError, master_identity, number,
 )
 
 
@@ -28,16 +32,23 @@ class TossSettings:
         )))
 
 
-class TossBrokerConnector(BrokerConnector):
-    def __init__(self, settings, redis, http, *, toss_settings: TossSettings, **kwargs):
-        super().__init__(settings, redis, http, **kwargs)
-        self.toss_settings = toss_settings
+def toss_account(settings: TossSettings):
+    """Account factory for BrokerConnector(account=...)."""
+    return lambda connector: TossAccount(connector, settings)
+
+
+class TossAccount:
+    """Uses the connector's shared HTTP client, request semaphore, retries and OAuth cache."""
+
+    def __init__(self, connector, settings: TossSettings):
+        self.connector = connector
+        self.settings = settings
         self._account_seq = None
         self._account_lock = asyncio.Lock()
 
-    async def _toss_request(self, method, path, **kwargs):
-        async with self.semaphore:
-            response = await self.http.request(method, TOSS_API + path, **kwargs)
+    async def _request(self, method, path, **kwargs):
+        async with self.connector.semaphore:
+            response = await self.connector.http.request(method, TOSS_API + path, **kwargs)
         status = response.status_code
         if status in {408, 429} or status >= 500:
             raise RetryableBrokerError(f"Toss HTTP {status}")
@@ -53,26 +64,26 @@ class TossBrokerConnector(BrokerConnector):
             raise BrokerError("Invalid Toss response object")
         return body
 
-    async def _toss_token(self):
-        settings = self.toss_settings
+    async def _token(self):
+        settings = self.settings
         if not settings.client_id or not settings.client_secret:
             raise BrokerConfigurationError("toss_account_not_configured", "live")
         fingerprint = sha256(f"{settings.client_id}\0{settings.client_secret}".encode()).hexdigest()
 
         async def issue():
-            return await self._toss_request("POST", "/oauth2/token", data={
+            return await self._request("POST", "/oauth2/token", data={
                 "grant_type": "client_credentials",
                 "client_id": settings.client_id,
                 "client_secret": settings.client_secret,
             })
 
-        return await self._cached_oauth(f"finguard:toss:oauth:{fingerprint}", issue)
+        return await self.connector._cached_oauth(f"finguard:toss:oauth:{fingerprint}", issue)
 
-    async def _toss_get(self, path, *, account_seq=None, params=None):
-        headers = {"Authorization": f"Bearer {await self._toss_token()}"}
+    async def _get(self, path, *, account_seq=None, params=None):
+        headers = {"Authorization": f"Bearer {await self._token()}"}
         if account_seq is not None:
             headers["X-Tossinvest-Account"] = account_seq
-        body = await self._retry(lambda: self._toss_request("GET", path, headers=headers, params=params))
+        body = await self.connector._retry(lambda: self._request("GET", path, headers=headers, params=params))
         if "result" not in body:
             raise BrokerError("Toss response is missing result")
         return body["result"]
@@ -81,7 +92,7 @@ class TossBrokerConnector(BrokerConnector):
         async with self._account_lock:
             if self._account_seq is not None:
                 return self._account_seq
-            accounts = await self._toss_get("/api/v1/accounts")
+            accounts = await self._get("/api/v1/accounts")
             if not isinstance(accounts, list):
                 raise BrokerError("Invalid Toss account list")
             if any(not isinstance(row, dict) for row in accounts):
@@ -91,7 +102,7 @@ class TossBrokerConnector(BrokerConnector):
                 if row.get("accountType") == "BROKERAGE"
                 and type(row.get("accountSeq")) is int
             ]
-            configured = self.toss_settings.account_seq
+            configured = self.settings.account_seq
             if configured and configured in accounts:
                 self._account_seq = configured
             elif not configured and len(accounts) == 1:
@@ -101,13 +112,14 @@ class TossBrokerConnector(BrokerConnector):
             return self._account_seq
 
     async def get_balance(self) -> Balance:
-        overview = await self._toss_get("/api/v1/holdings", account_seq=await self._select_account())
+        overview = await self._get("/api/v1/holdings", account_seq=await self._select_account())
         try:
             domestic = [(row, number(row["quantity"])) for row in overview["items"]
                         if row["marketCountry"] == "KR" and row["currency"] == "KRW"]
             positions = [(row, qty) for row, qty in domestic if qty != ZERO]
             total = number(overview["marketValue"]["amount"]["krw"])
-            master = await self.stock_master(list(dict.fromkeys(row["symbol"] for row, _ in positions)))
+            codes = list(dict.fromkeys(row["symbol"] for row, _ in positions))
+            master = await self.connector.stock_master(codes)
             holdings = []
             for row, quantity in positions:
                 code = row["symbol"]
@@ -125,8 +137,8 @@ class TossBrokerConnector(BrokerConnector):
         return Balance(None, total, None, tuple(holdings))
 
     async def get_orderable_cash(self, holding: Holding | None = None) -> Decimal:
-        payload = await self._toss_get("/api/v1/buying-power", account_seq=await self._select_account(),
-                                       params={"currency": "KRW"})
+        payload = await self._get("/api/v1/buying-power", account_seq=await self._select_account(),
+                                  params={"currency": "KRW"})
         try:
             return number(payload["cashBuyingPower"])
         except (KeyError, TypeError, ValueError, DecimalException) as exc:

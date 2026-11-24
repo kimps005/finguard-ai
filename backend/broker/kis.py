@@ -59,10 +59,81 @@ class BrokerSettings:
         return cls(credentials("KIS_"), credentials("KIS_VIRTUAL_"), mode == "true")
 
 
-class BrokerConnector:
-    """Share one instance per backend process to share the request semaphore."""
+class KisAccount:
+    """KIS domestic account on the virtual or live domain, chosen by IS_VIRTUAL."""
 
-    def __init__(self, settings, redis, http, *, market_data=None, stock_master=fetch_stocks,
+    def __init__(self, connector):
+        self.connector = connector
+
+    async def get_balance(self) -> Balance:
+        virtual = self.connector.settings.is_virtual
+        domain, credentials, transaction = (
+            (VIRTUAL, self.connector.settings.virtual, "VTTC8434R") if virtual
+            else (LIVE, self.connector.settings.live, "TTTC8434R")
+        )
+        if not all((credentials.account_no, credentials.app_key, credentials.app_secret)):
+            raise BrokerConfigurationError("kis_account_not_configured", "virtual" if virtual else "live")
+        params = {
+            "CANO": credentials.account_no, "ACNT_PRDT_CD": credentials.product_code,
+            "AFHR_FLPR_YN": "N", "OFL_YN": "", "INQR_DVSN": "02", "UNPR_DVSN": "01",
+            "FUND_STTL_ICLD_YN": "N", "FNCG_AMT_AUTO_RDPT_YN": "N", "PRCS_DVSN": "00",
+        }
+        rows, cursors = [], set()
+        summary = None
+        cursor = ("", "")
+        continuation = ""
+        while True:
+            params["CTX_AREA_FK100"], params["CTX_AREA_NK100"] = cursor
+            body, headers = await self.connector._get(domain, credentials, "/trading/inquire-balance",
+                                            transaction, params, continuation)
+            rows.extend(body["output1"])
+            if summary is None and body.get("output2"):
+                summary = body["output2"][0]
+            if headers.get("tr_cont") not in {"F", "M"}:
+                break
+            cursor = tuple(body[field].strip() for field in ("ctx_area_fk100", "ctx_area_nk100"))
+            if not any(cursor) or cursor in cursors:
+                raise BrokerError("Invalid KIS balance continuation")
+            cursors.add(cursor)
+            continuation = "N"
+        if summary is None:
+            raise BrokerError("KIS balance summary is missing")
+        cash, total = (number(summary[field]) for field in ("dnca_tot_amt", "tot_evlu_amt"))
+        positions = [(row, number(row["hldg_qty"])) for row in rows]
+        positions = [(row, qty) for row, qty in positions if qty != ZERO]
+        master = await self.connector.stock_master(list(dict.fromkeys(symbol(row["pdno"]) for row, _ in positions)))
+        holdings = []
+        for row, quantity in positions:
+            code = symbol(row["pdno"])
+            asset_type, corp_code, isin = master_identity(master.get(code))
+            avg, price, cost, value, pnl, pnl_pct = (number(row[field]) for field in (
+                "pchs_avg_pric", "prpr", "pchs_amt", "evlu_amt", "evlu_pfls_amt", "evlu_pfls_rt",
+            ))
+            holdings.append(Holding(code, row["prdt_name"], asset_type, corp_code, isin, quantity,
+                                    avg, price, cost, value, pnl, pnl_pct, value / total if total else ZERO))
+        return Balance(cash, total, cash / total if total else ZERO, tuple(holdings))
+
+    async def get_orderable_cash(self, holding: Holding | None = None) -> Decimal:
+        domain, credentials, tr_id = (
+            (VIRTUAL, self.connector.settings.virtual, "VTTC8908R") if self.connector.settings.is_virtual
+            else (LIVE, self.connector.settings.live, "TTTC8908R"))
+        payload, _ = await self.connector._get(
+            domain, credentials, "/trading/inquire-psbl-order", tr_id,
+            {"CANO": credentials.account_no, "ACNT_PRDT_CD": credentials.product_code,
+             "PDNO": holding.stock_code if holding else "",
+             "ORD_UNPR": format(holding.current_price, "f") if holding else "0",
+             "ORD_DVSN": "00", "CMA_EVLU_AMT_ICLD_YN": "N", "OVRS_ICLD_YN": "N"})
+        return number(payload["output"]["ord_psbl_cash"])
+
+
+class BrokerConnector:
+    """Account access plus KRX market data. Share one instance per process for the semaphore.
+
+    The account source is pluggable (KIS by default, Toss via toss_account); quotes, bars
+    and investor flows always use the KIS live domain with a PyKRX fallback.
+    """
+
+    def __init__(self, settings, redis, http, *, account=None, market_data=None, stock_master=fetch_stocks,
                  clock=None, sleep=asyncio.sleep):
         self.settings = settings
         self.redis = redis
@@ -72,6 +143,7 @@ class BrokerConnector:
         self.clock = clock if clock is not None else lambda: datetime.now(timezone.utc)
         self.sleep = sleep
         self.semaphore = asyncio.Semaphore(2)
+        self.account = (account or KisAccount)(self)
 
     @classmethod
     @asynccontextmanager
@@ -181,64 +253,10 @@ class BrokerConnector:
         ))
 
     async def get_balance(self) -> Balance:
-        virtual = self.settings.is_virtual
-        domain, credentials, transaction = (
-            (VIRTUAL, self.settings.virtual, "VTTC8434R") if virtual
-            else (LIVE, self.settings.live, "TTTC8434R")
-        )
-        if not all((credentials.account_no, credentials.app_key, credentials.app_secret)):
-            raise BrokerConfigurationError("kis_account_not_configured", "virtual" if virtual else "live")
-        params = {
-            "CANO": credentials.account_no, "ACNT_PRDT_CD": credentials.product_code,
-            "AFHR_FLPR_YN": "N", "OFL_YN": "", "INQR_DVSN": "02", "UNPR_DVSN": "01",
-            "FUND_STTL_ICLD_YN": "N", "FNCG_AMT_AUTO_RDPT_YN": "N", "PRCS_DVSN": "00",
-        }
-        rows, cursors = [], set()
-        summary = None
-        cursor = ("", "")
-        continuation = ""
-        while True:
-            params["CTX_AREA_FK100"], params["CTX_AREA_NK100"] = cursor
-            body, headers = await self._get(domain, credentials, "/trading/inquire-balance",
-                                            transaction, params, continuation)
-            rows.extend(body["output1"])
-            if summary is None and body.get("output2"):
-                summary = body["output2"][0]
-            if headers.get("tr_cont") not in {"F", "M"}:
-                break
-            cursor = tuple(body[field].strip() for field in ("ctx_area_fk100", "ctx_area_nk100"))
-            if not any(cursor) or cursor in cursors:
-                raise BrokerError("Invalid KIS balance continuation")
-            cursors.add(cursor)
-            continuation = "N"
-        if summary is None:
-            raise BrokerError("KIS balance summary is missing")
-        cash, total = (number(summary[field]) for field in ("dnca_tot_amt", "tot_evlu_amt"))
-        positions = [(row, number(row["hldg_qty"])) for row in rows]
-        positions = [(row, qty) for row, qty in positions if qty != ZERO]
-        master = await self.stock_master(list(dict.fromkeys(symbol(row["pdno"]) for row, _ in positions)))
-        holdings = []
-        for row, quantity in positions:
-            code = symbol(row["pdno"])
-            asset_type, corp_code, isin = master_identity(master.get(code))
-            avg, price, cost, value, pnl, pnl_pct = (number(row[field]) for field in (
-                "pchs_avg_pric", "prpr", "pchs_amt", "evlu_amt", "evlu_pfls_amt", "evlu_pfls_rt",
-            ))
-            holdings.append(Holding(code, row["prdt_name"], asset_type, corp_code, isin, quantity,
-                                    avg, price, cost, value, pnl, pnl_pct, value / total if total else ZERO))
-        return Balance(cash, total, cash / total if total else ZERO, tuple(holdings))
+        return await self.account.get_balance()
 
     async def get_orderable_cash(self, holding: Holding | None = None) -> Decimal:
-        domain, credentials, tr_id = (
-            (VIRTUAL, self.settings.virtual, "VTTC8908R") if self.settings.is_virtual
-            else (LIVE, self.settings.live, "TTTC8908R"))
-        payload, _ = await self._get(
-            domain, credentials, "/trading/inquire-psbl-order", tr_id,
-            {"CANO": credentials.account_no, "ACNT_PRDT_CD": credentials.product_code,
-             "PDNO": holding.stock_code if holding else "",
-             "ORD_UNPR": format(holding.current_price, "f") if holding else "0",
-             "ORD_DVSN": "00", "CMA_EVLU_AMT_ICLD_YN": "N", "OVRS_ICLD_YN": "N"})
-        return number(payload["output"]["ord_psbl_cash"])
+        return await self.account.get_orderable_cash(holding)
 
     async def _market(self, endpoint, transaction, code, params=None):
         code_params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code}

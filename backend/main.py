@@ -21,7 +21,7 @@ from backend.portfolio_market import MarketData
 from backend.price_bands import StockPriceUnavailable, price_band_updates, stock_price_band_updates
 from backend.serialization import dump
 from backend.stock_master import search_stocks
-from backend.toss_broker import TossBrokerConnector, TossSettings
+from backend.toss_broker import TossSettings, toss_account
 
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ async def keep_krx_session(market_data, interval=300, margin=900):
 async def lifespan(app: FastAPI):
     provider = os.getenv("BROKER_PROVIDER", "toss").strip().lower()
     if provider == "toss":
-        connector = TossBrokerConnector.from_env(toss_settings=TossSettings.from_env())
+        connector = BrokerConnector.from_env(account=toss_account(TossSettings.from_env()))
     elif provider == "kis":
         connector = BrokerConnector.from_env()
     else:
