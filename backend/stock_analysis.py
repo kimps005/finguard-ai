@@ -7,12 +7,10 @@ from typing import Annotated
 from pydantic import BaseModel, StringConstraints, ValidationError
 
 from backend import dart_rag, llm
+from backend.citations import ALIAS, CITATION_MARK, RECEIPT, AliasBook
 from backend.serialization import dump
 
 
-ALIAS = re.compile(r"DOC-[0-9]+")
-CITATION_MARK = re.compile(r"\[DOC-[0-9]+\]|" + ALIAS.pattern)
-RECEIPT = re.compile(r"(?<![0-9])[0-9]{14}(?![0-9])")
 ANSWER_HEADING = "### 핵심 답변"
 EVIDENCE_HEADING = "### 판단 근거"
 Alias = Annotated[str, StringConstraints(pattern=r"^DOC-[1-9][0-9]*$")]
@@ -52,15 +50,12 @@ async def analyze_stock(job, external):
     chunks, news = await asyncio.gather(
         dart_rag.search(stock["corp_code"], job["query"]),
         external.get_news(job.get("corp_name") or stock["name"]))
-    aliases = {}
-    documents = []
-    for row in chunks:
-        alias = aliases.setdefault(row["rcept_no"], f"DOC-{len(aliases) + 1}")
-        documents.append({"source": alias, "title": RECEIPT.sub("(공시번호 생략)", row["report_nm"]),
-                          "text": RECEIPT.sub("(공시번호 생략)", row["chunk_text"])})
+    book = AliasBook()
+    documents = [book.document(row) for row in chunks]
+    # Overhang filings get aliases too, so the local report can link them without a chunk.
     for event in job["events"]:
-        aliases.setdefault(event["rcept_no"], f"DOC-{len(aliases) + 1}")
-    result = {"stock_code": stock["stock_code"], "doc_map": {v: k for k, v in aliases.items()},
+        book.alias(event["rcept_no"])
+    result = {"stock_code": stock["stock_code"], "doc_map": book.doc_map(),
               "disclosures": documents, "news": news}
     try:
         return {**await analyze(dump(cloud_context(stock, job["scorecard"], documents))), **result}
@@ -72,14 +67,13 @@ async def analyze_stock(job, external):
 async def synthesize(state):
     # Worker aliases are issuer-local. Give the portfolio prompt one unambiguous namespace.
     rows = {row["stock_code"]: row for row in state["stock_analysis_results"]}
-    aliases, titles, portfolio = {}, {}, []
+    book, titles, portfolio = AliasBook(), {}, []
     for stock in state["holdings"]:
         code = stock["stock_code"]
         row = rows.get(code, {})
         documents = []
         for doc in row.get("disclosures", []):
-            receipt = row["doc_map"][doc["source"]]
-            alias = aliases.setdefault(receipt, f"DOC-{len(aliases) + 1}")
+            alias = book.alias(row["doc_map"][doc["source"]])
             titles.setdefault(alias, doc["title"])
             documents.append({**doc, "source": alias})
         portfolio.append(cloud_context(stock, state["quant_scorecards"].get(code, {}), documents))
@@ -100,7 +94,7 @@ async def synthesize(state):
     )
     if not sections or any(not section.strip() or re.search(r"(?m)^\s*#", section) for section in sections.groups()):
         raise llm.LLMUnavailable("Invalid synthesis report format", reason="응답 형식 오류")
-    doc_map = {alias: receipt for receipt, alias in aliases.items()}
+    doc_map = book.doc_map()
     verified = await asyncio.to_thread(verify_results, [{
         "analysis_text": sections[1], "citations": answer.citations, "stock_code": "종합 진단",
         "doc_map": doc_map}], preserve_aliases=True)

@@ -15,6 +15,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, Send
 
 from backend import llm, stock_analysis
+from backend.citations import AliasBook
 from backend.broker import Balance
 from backend.finance_calc import calculate_scorecard, simulate_purchase
 from backend.portfolio_market import MarketData, ScoreInputs
@@ -155,7 +156,8 @@ def diagnosis_report(state, summary="", disclosures=()):
                         f"매수 수량 {simulation['buy_quantity']:,}주, 예상 평단가 {won(average)}")
 
     rows = {row["stock_code"]: row for row in state["stock_analysis_results"]}
-    local_aliases = {}
+    # Report links get their own namespace, numbered in the order the report cites them.
+    report_book = AliasBook()
     for h in selected:
         code, name = h["stock_code"], h["name"]
         price, average = won(h["current_price"]), won(h["average_price"])
@@ -204,7 +206,7 @@ def diagnosis_report(state, summary="", disclosures=()):
                 titles = {doc["source"]: doc["title"] for doc in row.get("disclosures", [])}
                 for alias, receipt in row.get("doc_map", {}).items():
                     if receipt in receipts:
-                        report_alias = local_aliases.setdefault(receipt, f"DOC-{len(local_aliases) + 1}")
+                        report_alias = report_book.alias(receipt)
                         scenario += f" 오버행 산정에는 [{report_alias}]의 전환가능 물량이 반영됐습니다."
                         evidence.append(f"{name} · " + disclosure_link(
                             report_alias, titles.get(alias, "오버행 공시"), receipt))

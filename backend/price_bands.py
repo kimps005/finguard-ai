@@ -11,8 +11,9 @@ from pydantic import BaseModel, Field
 from backend import dart_rag, llm
 from backend.market_time import KST, confirmed_day
 from backend.portfolio_market import stock_master
+from backend.citations import ALIAS, RECEIPT, AliasBook
 from backend.serialization import dump
-from backend.stock_analysis import ALIAS, RECEIPT, Analysis
+from backend.stock_analysis import Analysis
 
 
 logger = logging.getLogger(__name__)
@@ -215,18 +216,17 @@ async def price_band_updates(market):
 
 
 async def enrich_bands(rows):
-    contexts, targets, aliases = [], [], {}
+    # One prompt covers every band, so all bands share one alias namespace.
+    contexts, targets, book = [], [], AliasBook()
     for band, signals, chunks in rows:
         if not chunks:
             continue
         documents, references = [], {}
         for row in chunks:
-            receipt = row["rcept_no"]
-            alias = aliases.setdefault(receipt, f"DOC-{len(aliases) + 1}")
-            title = RECEIPT.sub("(공시번호 생략)", row["report_nm"])
-            documents.append({"source": alias, "title": title,
-                              "text": RECEIPT.sub("(공시번호 생략)", row["chunk_text"])})
-            references[alias] = {"alias": alias, "title": title, "receipt": receipt}
+            document = book.document(row)
+            documents.append(document)
+            references[document["source"]] = {"alias": document["source"], "title": document["title"],
+                                              "receipt": row["rcept_no"]}
         contexts.append({**signals, "disclosures": documents})
         targets.append((band, references))
 
