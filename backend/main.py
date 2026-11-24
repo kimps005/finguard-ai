@@ -27,6 +27,16 @@ PUBLIC_FIELDS = ["intent_type", "account_summary", "holdings", "quant_scorecards
                  "simulation_result", "verified_stock_results", "guardrail_warnings", "final_report"]
 
 
+async def keep_krx_session(market_data, interval=300, margin=900):
+    """PyKRX logs in to KRX lazily (~8s); keep it ready so quote requests stay under their timeouts."""
+    while True:
+        try:
+            await asyncio.to_thread(market_data.keep_session, margin)
+        except Exception as exc:
+            logger.warning("KRX session refresh failed (%s)", type(exc).__name__)
+        await asyncio.sleep(interval)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     provider = os.getenv("BROKER_PROVIDER", "toss").strip().lower()
@@ -42,9 +52,13 @@ async def lifespan(app: FastAPI):
         app.state.external_connectors = ExternalConnectors.from_env(broker.http, broker.redis)
         app.state.market = MarketData(broker, app.state.dart_etl, app.state.external_connectors)
         app.state.graph = build_graph(app.state.market)
+        keep_session = getattr(broker.market_data, "keep_session", None)
+        krx_task = asyncio.create_task(keep_krx_session(broker.market_data)) if keep_session else None
         try:
             yield
         finally:
+            if krx_task:
+                krx_task.cancel()
             await app.state.dart_etl.close()
 
 
