@@ -6,9 +6,9 @@ from datetime import date, timedelta
 from decimal import Decimal
 import json
 
-import psycopg
 from psycopg.rows import dict_row
 
+from backend import db
 from backend.broker import BrokerConnector, DailyBar, FiveDayFlow, Holding
 from backend.connectors import ExternalConnectors
 from backend.dart_etl import DartETL
@@ -29,7 +29,7 @@ class ScoreInputs:
 
 
 async def outstanding_events(corp_code: str, on: date) -> list[dict]:
-    async with await psycopg.AsyncConnection.connect(row_factory=dict_row) as conn:
+    async with db.connection(row_factory=dict_row) as conn:
         cursor = await conn.execute(
             "SELECT corp_code, event_type, convertible_shares, conversion_price, "
             "board_resolution_date, exercise_start_date, exercise_end_date, rcept_no "

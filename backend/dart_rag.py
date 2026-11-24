@@ -4,8 +4,9 @@ import asyncio
 from functools import lru_cache
 import json
 
-import psycopg
 from psycopg.rows import dict_row
+
+from backend import db
 
 
 gpu_semaphore = asyncio.Semaphore(1)
@@ -109,7 +110,7 @@ async def search(corp_code: str, query: str, *, limit: int = 5, candidates: int 
     params = {"corp": corp_code, "terms": " OR ".join(dict.fromkeys(tokens)),
               "vector": json.dumps(vector, allow_nan=False), "candidates": candidates,
               "since": since, "until": until}
-    async with await psycopg.AsyncConnection.connect(row_factory=dict_row) as conn:
+    async with db.connection(row_factory=dict_row) as conn:
         # Prefer the issuer B-tree even before a newly ingested volume has statistics.
         await conn.execute("SET LOCAL enable_seqscan = off")
         cursor = await conn.execute(HYBRID_SQL, params)

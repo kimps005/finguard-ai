@@ -17,7 +17,7 @@ import psycopg
 from psycopg.rows import dict_row
 from redis.exceptions import RedisError
 
-from backend import dart_rag
+from backend import dart_rag, db
 from backend.broker import KST, RETRY_DELAYS, day_string, number, symbol
 from backend.finance_calc import CALC_CONTEXT, LockupRelease
 from backend.lockup_disclosures import disclosed_releases
@@ -313,7 +313,7 @@ class ExternalConnectors:
         as_of = self.clock().astimezone(KST).date()
         stock = None
         try:
-            async with await psycopg.AsyncConnection.connect(row_factory=dict_row) as conn:
+            async with db.connection(row_factory=dict_row) as conn:
                 cursor = await conn.execute(
                     "SELECT asset_type, corp_code, isin_cd, corp_name, listed_shares, crno "
                     "FROM stock_master WHERE stock_code = %s", (symbol(stock_code),),

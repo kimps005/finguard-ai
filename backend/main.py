@@ -1,5 +1,5 @@
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from decimal import DecimalException
 import logging
 import os
@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, StringConstraints
 from redis.exceptions import RedisError
 
+from backend import db
 from backend.broker import BrokerConfigurationError, BrokerConnector, BrokerError
 from backend.connectors import ExternalConnectors
 from backend.dart_etl import DartETL
@@ -48,7 +49,11 @@ async def lifespan(app: FastAPI):
         connector = BrokerConnector.from_env()
     else:
         raise ValueError("BROKER_PROVIDER must be toss or kis")
-    async with connector as broker:
+    async with AsyncExitStack() as resources:
+        # Exit runs in reverse: ETL tasks stop, then the broker clients, then the pool.
+        await db.open_pool()
+        resources.push_async_callback(db.close_pool)
+        broker = await resources.enter_async_context(connector)
         app.state.broker = broker
         app.state.dart_etl = DartETL(broker.redis, broker.http, os.getenv("DART_API_KEY"))
         app.state.external_connectors = ExternalConnectors.from_env(broker.http, broker.redis)
