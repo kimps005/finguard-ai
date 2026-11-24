@@ -72,59 +72,34 @@ DashScope의 기본 주소는 `DASHSCOPE_BASE_URL=https://dashscope-intl.aliyunc
 
 두 공급자를 모두 사용할 수 없어도 진단은 완료됩니다. 대시보드 경고 배너에서 영향을 받은 단계를 확인할 수 있고, 리포트에는 Python이 계산한 스코어카드·희석률·매수 시뮬레이션과 종목별 DOC-N 공시 링크가 남습니다.
 
-브라우저에서 [http://127.0.0.1:3000](http://127.0.0.1:3000)을 열고 PIN을 입력합니다. 초기 PostgreSQL 볼륨에는 두 마이그레이션이 적용됩니다. 백엔드 시작 시 Module 4 마이그레이션을 재적용하고, 키가 구성된 경우 종목 마스터를 동기화한 뒤 Uvicorn을 시작합니다. GPU 모델 파일은 data/huggingface에 캐시됩니다.
+브라우저에서 [http://127.0.0.1:3000](http://127.0.0.1:3000)을 열고 PIN을 입력합니다. 초기 PostgreSQL 볼륨에는 두 마이그레이션이 적용됩니다. 백엔드 시작 시 Module 4 마이그레이션을 재적용합니다. `DART_API_KEY`와 `FSC_SERVICE_KEY`가 모두 있으면 종목 마스터가 비어 있을 때만 동기화를 마친 뒤 Uvicorn을 시작하고, 이미 데이터가 있으면 기동을 막지 않도록 백그라운드에서 갱신합니다. 프론트엔드는 백엔드 `/health` 헬스체크가 통과한 뒤 시작합니다. GPU 모델 파일은 data/huggingface에 캐시됩니다.
 
-### 로컬 개발 (Windows PowerShell)
+### 로컬 개발
 
-Python 3.11 가상환경과 Node.js 22.18 이상을 사용합니다. 아래 Compose 오버라이드는 호스트에서 접근할 수 있도록 DB와 Redis를 루프백에 공개합니다. .env.example의 `PGHOST`, `PGPORT`, `REDIS_URL`, `BACKEND_INTERNAL_URL`은 이 로컬 실행용입니다. 별도로 설치한 PostgreSQL·pgvector와 Redis를 사용한다면 여기에 해당 주소를 지정합니다.
+Python 3.11 가상환경, Node.js 22.18 이상, Docker가 필요합니다. 처음 한 번 가상환경을 만들고 `.env`를 채웁니다.
 
 ```powershell
 uv venv --python 3.11 --seed .venv
 .\.venv\Scripts\pip.exe install -r tests/requirements.txt
-
-@'
-services:
-  db:
-    ports: ["127.0.0.1:55432:5432"]
-  redis:
-    ports: ["127.0.0.1:56379:6379"]
-'@ | docker compose -f docker-compose.yml -f - up -d --wait db redis
-
-Get-Content .env | ForEach-Object {
-    if ($_ -match '^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
-        Set-Item -LiteralPath ("Env:" + $Matches[1]) -Value $Matches[2]
-    }
-}
-$env:PGDATABASE = $env:POSTGRES_DB
-$env:PGUSER = $env:POSTGRES_USER
-$env:PGPASSWORD = $env:POSTGRES_PASSWORD
-
-.\.venv\Scripts\python.exe -m backend.dart_etl --migrate
-.\.venv\Scripts\python.exe -m backend.sync_stock_master
 ```
 
-Windows에서 비동기 psycopg를 쓰는 로컬 서버는 Selector 이벤트 루프로 실행합니다.
+이후에는 명령 하나로 개발 서버를 띄웁니다.
 
 ```powershell
-@'
-import asyncio
-import uvicorn
-
-config = uvicorn.Config("backend.main:app", host="127.0.0.1", port=8000, workers=1)
-with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
-    runner.run(uvicorn.Server(config).serve())
-'@ | .\.venv\Scripts\python.exe -
+.\.venv\Scripts\python.exe scripts/dev.py
 ```
 
-별도 셸에서 위와 같은 방법으로 .env를 불러온 뒤 저장소 루트에서 Next.js를 루프백에 바인딩합니다.
+`scripts/dev.py`는 `.env`를 읽고 `docker-compose.dev.yml`로 DB와 Redis를 루프백 포트에 띄웁니다. 이어서 마이그레이션을 적용하고, `stock_master`가 비어 있을 때만 동기화합니다. 그다음 FastAPI(자동 리로드, http://127.0.0.1:8000)와 Next.js(http://127.0.0.1:3000)를 함께 실행합니다. 셸에 이미 설정된 환경 변수가 `.env`보다 우선합니다. Ctrl+C를 누르면 두 서버가 함께 종료되고 DB와 Redis는 계속 실행됩니다.
 
-```powershell
-Set-Location frontend
-npm ci
-npm run dev -- --hostname 127.0.0.1
-```
+| 옵션 | 동작 |
+| --- | --- |
+| `--sync` | 종목 마스터를 강제로 다시 동기화 |
+| `--api-only` | FastAPI만 실행 |
+| `--api-port`, `--web-port` | 포트 변경. Compose의 프론트가 3000을 쓰고 있으면 `--web-port 3001` |
+| `--no-reload` | 백엔드 자동 리로드 끄기 |
+| `--no-infra` | Docker 대신 직접 설치한 PostgreSQL·Redis 사용(`.env`의 `PGHOST`, `PGPORT`, `REDIS_URL`) |
 
-Linux·macOS의 가상환경 실행 경로는 ./.venv/bin/python과 ./.venv/bin/pip입니다. Linux 백엔드는 ./.venv/bin/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1로 실행할 수 있습니다.
+백엔드만 따로 실행할 때는 `python -m backend.server [--reload]`를 사용합니다. Windows에서도 비동기 psycopg가 동작하도록 Selector 이벤트 루프와 `workers=1`이 고정되어 있습니다. Linux·macOS에서는 `./.venv/bin/python scripts/dev.py`로 실행합니다.
 
 ## Module 8 평가
 
