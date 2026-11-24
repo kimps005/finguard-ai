@@ -27,6 +27,9 @@ export interface Status {
   node: string;
   phase: "started" | "completed" | "failed";
   task_id?: string;
+  /** Sent only when a stock_worker task starts; later phases inherit it client-side. */
+  stock_code?: string;
+  stock_name?: string;
 }
 
 export type Scorecards = Record<string, {

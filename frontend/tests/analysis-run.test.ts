@@ -14,7 +14,7 @@ test("statuses merge per task, move the latest update last, and keep earlier met
   const state = run([
     { type: "start", topic: "진단" },
     { type: "status", status: { node: "router_node", phase: "started" } },
-    { type: "status", status: { node: "stock_worker", phase: "started", task_id: "a", stock_code: "005930" } as never },
+    { type: "status", status: { node: "stock_worker", phase: "started", task_id: "a", stock_code: "005930" } },
     { type: "status", status: { node: "stock_worker", phase: "started", task_id: "b" } },
     { type: "status", status: { node: "router_node", phase: "completed", task_id: "router-run" } },
     { type: "status", status: { node: "stock_worker", phase: "completed", task_id: "a" } },

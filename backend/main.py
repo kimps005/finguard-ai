@@ -178,7 +178,12 @@ async def chat_events(graph, query):
                 if node.startswith("__") or (started and node == "router_node"):
                     continue
                 phase = "started" if started else ("failed" if data.get("error") else "completed")
-                yield sse("status", {"node": node, "phase": phase, "task_id": data["id"]})
+                status = {"node": node, "phase": phase, "task_id": data["id"]}
+                if started and node == "stock_worker":
+                    # Name the stock once; the client keeps it for this task's later phases.
+                    stock = data["input"]["stock"]
+                    status.update(stock_code=stock["stock_code"], stock_name=stock["name"])
+                yield sse("status", status)
             elif mode == "custom":
                 yield sse("token", data)
             elif mode == "values":

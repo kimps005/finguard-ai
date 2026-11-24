@@ -504,3 +504,20 @@ def test_slow_dart_ingest_is_bounded(monkeypatch):
     assert any("최신 공시 적재" in warning for warning in result["guardrail_warnings"])
     # Events already in the database still feed the overhang score.
     assert result["quant_scorecards"]["000001"]["dilution_pct"] is not None
+
+
+def test_worker_status_events_name_their_stock_once(monkeypatch):
+    market = setup_market(monkeypatch, [position("000001", weight="0.3"), position("000002", weight="0.4")])
+
+    async def stream():
+        return [parse_frame(frame) async for frame in chat_events(build_graph(market), "포트폴리오 위험 진단")]
+
+    workers = [data for event, data in asyncio.run(stream())
+               if event == "status" and data["node"] == "stock_worker"]
+    started = {d["task_id"]: d for d in workers if d["phase"] == "started"}
+    assert sorted((d["stock_code"], d["stock_name"]) for d in started.values()) == [
+        ("000001", "종목000001"), ("000002", "종목000002")]
+    completed = [d for d in workers if d["phase"] == "completed"]
+    assert {d["task_id"] for d in completed} == set(started) and all("stock_code" not in d for d in completed)
+    # Other nodes carry no stock fields, and nothing from the user's query leaks into statuses.
+    assert all(set(d) == {"node", "phase", "task_id", "stock_code", "stock_name"} for d in started.values())
