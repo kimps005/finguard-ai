@@ -1,5 +1,5 @@
 import asyncio
-from contextlib import nullcontext
+from contextlib import ExitStack
 from datetime import date
 from decimal import Decimal
 from io import BytesIO
@@ -40,14 +40,19 @@ def run(coro):
 def database(tmp_path_factory):
     """Use an ephemeral PostgreSQL or a supplied test DSN, in a private schema."""
     dsn = os.getenv("MODULE4_TEST_DSN")
-    if dsn:
-        server = nullcontext()
-    else:
-        from embedded_postgres import get_server
-
-        server = get_server(tmp_path_factory.mktemp("module4-pg"))
     schema = "test_module4_" + uuid4().hex
-    with server as pg:
+    with ExitStack() as stack:
+        try:
+            if dsn:
+                pg = None
+            else:
+                from embedded_postgres import get_server
+
+                pg = stack.enter_context(get_server(tmp_path_factory.mktemp("module4-pg")))
+        except Exception as exc:
+            # Windows Smart App Control, for example, blocks the unsigned bundled initdb.exe.
+            pytest.skip(f"내장 PostgreSQL을 시작할 수 없습니다 ({type(exc).__name__}). "
+                        "pgvector DB를 띄우고 MODULE4_TEST_DSN을 설정하세요.")
         dsn = dsn or pg.get_uri()
         with psycopg.connect(dsn, autocommit=True, prepare_threshold=None) as conn:
             conn.execute(f"CREATE SCHEMA {schema}")
