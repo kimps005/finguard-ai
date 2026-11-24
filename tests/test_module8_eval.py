@@ -22,8 +22,8 @@ def test_balanced_offline_evaluation_uses_the_graph_and_all_numeric_fields():
     assert report["numeric_failures"] == 0
     assert report["cases"][0]["numeric_checks"] == {
         "dilution_pct": {"expected": "3.25", "observed": ["3.25"], "passed": True},
-        "average_price": {"expected": "9637.15", "observed": ["9637.15"], "passed": True},
-        "simulated_average_price": {"expected": "10073.12", "observed": ["10073.12"], "passed": True},
+        "average_price": {"expected": "9637", "observed": ["9637"], "passed": True},
+        "simulated_average_price": {"expected": "10073", "observed": ["10073"], "passed": True},
         "scorecard": {"expected": "60", "observed": ["60"], "passed": True},
     }
     assert "| Faithfulness | 1.0000 | ≥ 0.90 |" in ragas.markdown(report)
@@ -31,19 +31,24 @@ def test_balanced_offline_evaluation_uses_the_graph_and_all_numeric_fields():
 
 @pytest.mark.parametrize("original,replacement,failed_field", [
     ("3.25%", "3.24%", "dilution_pct"),
-    (" · 오버행 희석률 3.25%", "", "dilution_pct"),
-    ("9,637.15원", "9,637.16원", "average_price"),
-    ("60/100", "60/95", "scorecard"),
-    ("60/100", "60/100 · 정량 점수 59/100", "scorecard"),
-    ("10,073.12원", "10,073.11원", "simulated_average_price"),
-    ("| 종목 | 970001 |", "| 종목 | 970002 |", "simulated_average_price"),
+    ("- 가상 · 오버행 희석률 3.25%\n", "", "dilution_pct"),
+    ("평단가 9,637원", "평단가 9,638원", "average_price"),
+    ("(합계 60/100)", "(합계 60/95)", "scorecard"),
+    ("(합계 60/100)", "(합계 60/100)\n- 가상 · 수급 0, 모멘텀 0, 실적 0, 오버행 0점 (합계 59/100)", "scorecard"),
+    ("예상 평단가 10,073원\n", "예상 평단가 10,074원\n", "simulated_average_price"),
+    ("**가상** 현재가에", "**다른종목** 현재가에", "simulated_average_price"),
 ])
 def test_numeric_grading_counts_missing_wrong_and_duplicate_values(original, replacement, failed_field):
-    report = ("- 가상 (970001) · 평단가 9,637.15원 · 정량 점수 60/100 · 오버행 희석률 3.25%\n"
-              "### 매수 시뮬레이션\n| 종목 | 970001 |\n| 예상 평단가 | 10,073.12원 |\n"
-              "### 970001\n다른 예시 정량 점수 80/100")
-    expected = dict(zip(ragas.NUMERIC_PATTERNS, map(Decimal, ("3.25", "9637.15", "10073.12", "60")), strict=True))
-    checks = ragas.grade_numbers(report.replace(original, replacement), "970001", expected)
+    # Values in the answer prose and in other holdings' lines must not count.
+    report = ("### 핵심 답변\n\n**가상** 현재가에 2주 체결을 가정하면 예상 평단가는 10,074원입니다. "
+              "합산 점수는 59/100입니다.\n\n### 판단 근거\n\n"
+              "- 매수 시뮬레이션 · 투자 금액 20,146원, 매수 수량 2주, 예상 평단가 10,073원\n"
+              "- 가상 · 현재가 12,253원, 평단가 9,637원, 20일선 12,153원\n"
+              "- 가상 · 오버행 희석률 3.25%\n"
+              "- 가상 · 수급 15, 모멘텀 15, 실적 25, 오버행 5점 (합계 60/100)\n"
+              "- 다른종목 · 수급 25, 모멘텀 25, 실적 25, 오버행 5점 (합계 80/100)")
+    expected = dict(zip(ragas.NUMERIC_PATTERNS, map(Decimal, ("3.25", "9637", "10073", "60")), strict=True))
+    checks = ragas.grade_numbers(report.replace(original, replacement), "가상", expected)
     assert [name for name, check in checks.items() if not check["passed"]] == [failed_field]
     result = ragas.case_result({"id": "test", "type": "bond_issue"}, 1.0, 1.0, checks)
     summary = ragas.summarize({"source": "test"}, [result], "dry-run")

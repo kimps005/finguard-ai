@@ -5,7 +5,7 @@ import asyncio
 from collections import Counter
 from contextlib import asynccontextmanager, nullcontext
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 import json
 import math
 import os
@@ -121,9 +121,9 @@ def scenario(case):
     purchase = simulate_purchase(holding, balance, cash, amount=budget)
     expected = {
         "dilution_pct": card["dilution_pct"],
-        "average_price": holding.average_price,
-        # report_parts displays the simulated average rounded to two decimal places.
-        "simulated_average_price": Decimal(f"{purchase.average_price:.2f}"),
+        # diagnosis_report renders prices as whole won, rounded half up.
+        "average_price": holding.average_price.to_integral_value(rounding=ROUND_HALF_UP),
+        "simulated_average_price": purchase.average_price.to_integral_value(rounding=ROUND_HALF_UP),
         "scorecard": Decimal(card["total"]),
     }
     query = f"{case['question']} {code} 종목을 {budget:f}원 추매하면 예상 평단가는 얼마인가요?"
@@ -132,30 +132,27 @@ def scenario(case):
 
 NUMBER = r"([+-]?(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?)"
 NUMERIC_PATTERNS = {
-    "dilution_pct": rf" · 오버행 희석률 {NUMBER}%",
-    "average_price": rf" · 평단가 {NUMBER}원",
-    "simulated_average_price": rf"^\| 예상 평단가 \| {NUMBER}원 \|$",
-    "scorecard": rf" · 정량 점수 {NUMBER}/100(?![\d.])",
+    "dilution_pct": rf" · 오버행 희석률 {NUMBER}%$",
+    "average_price": rf", 평단가 {NUMBER}원",
+    "simulated_average_price": rf"^- 매수 시뮬레이션 · .*, 예상 평단가 {NUMBER}원$",
+    "scorecard": rf" \(합계 {NUMBER}/100\)$",
 }
 
 
-def grade_numbers(report, stock_code, expected):
-    """Require one correctly rendered value per field for the evaluated holding."""
-    holding_lines = [line for line in report.splitlines()
-                     if re.match(rf"^- .+ \({re.escape(stock_code)}\) · ", line)]
-    holding = "\n".join(holding_lines)
-    # These fields are emitted before the first worker's Markdown section.
-    before_workers = re.split(r"^### [0-9]{6}$", report, maxsplit=1, flags=re.MULTILINE)[0]
-    simulations = before_workers.split("\n### 매수 시뮬레이션\n")
-    table = simulations[-1] if len(simulations) == 2 else ""
-    simulation_codes = re.findall(r"^\| 종목 \| ([0-9]{6}) \|$", table, re.MULTILINE)
+def grade_numbers(report, name, expected):
+    """Require one correctly rendered value per field in the deterministic evidence section."""
+    answer, _, evidence = report.partition(f"\n{stock_analysis.EVIDENCE_HEADING}\n")
+    holding = "\n".join(line for line in evidence.splitlines() if line.startswith(f"- {name} · "))
+    simulations = re.findall(r"^- 매수 시뮬레이션 · ", evidence, re.MULTILINE)
+    # The evidence line omits the stock, so the answer must attribute the simulation to it.
+    simulated_name = re.findall(r"\*\*(.+?)\*\* 현재가에 [0-9,]+주 체결을 가정하면", answer)
     checks = {}
     for field, target in expected.items():
         is_simulation = field == "simulated_average_price"
-        text = table if is_simulation else holding
+        text = evidence if is_simulation else holding
         matches = [Decimal(value.replace(",", ""))
                    for value in re.findall(NUMERIC_PATTERNS[field], text, re.MULTILINE)]
-        correct_scope = simulation_codes == [stock_code] if is_simulation else len(holding_lines) == 1
+        correct_scope = len(simulations) == 1 and simulated_name == [name] if is_simulation else True
         checks[field] = {"expected": format(target, "f"), "observed": [format(v, "f") for v in matches],
                          "passed": matches == [target] and correct_scope}
     return checks
@@ -196,7 +193,7 @@ async def run_case(case, *, dry_run):
         raise RuntimeError(f"{case['id']}: token stream differs from final report")
     answer = " ".join(row["analysis_text"] for row in done["verified_stock_results"])
     answer = re.sub(r"\s*\[[0-9]{14}\]", "", answer)
-    return context, answer, grade_numbers(report, case["stock_code"], expected)
+    return context, answer, grade_numbers(report, case["issuer"], expected)
 
 
 async def dry_retrieval(case):
