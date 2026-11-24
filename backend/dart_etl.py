@@ -16,7 +16,7 @@ import httpx
 import psycopg
 from redis.exceptions import LockNotOwnedError
 
-from backend import dart_rag
+from backend import dart_rag, db
 from backend.dart_chunks import chunk_document
 
 
@@ -111,7 +111,7 @@ class DartETL:
         self._pending_ingests: dict[str, asyncio.Task] = {}
 
     async def has_recent_chunks(self, corp_code: str, start: date, end: date) -> bool:
-        async with await psycopg.AsyncConnection.connect() as conn:
+        async with db.connection() as conn:
             cursor = await conn.execute(
                 "SELECT 1 FROM dart_chunks WHERE corp_code = %s AND rcept_dt BETWEEN %s AND %s LIMIT 1",
                 (corp_code, start, end))
@@ -154,6 +154,12 @@ class DartETL:
             raise RuntimeError(f"DART {endpoint} returned HTTP {response.status_code}")
         return response.content
 
+    async def financial_statement(self, corp_code: str, year: int, period: str, basis: str) -> dict:
+        """One fnlttSinglAcntAll response ({"status", "list"}) with amounts as Decimal."""
+        raw = await self._request("fnlttSinglAcntAll.json", corp_code=corp_code, bsns_year=str(year),
+                                  reprt_code=period, fs_div=basis)
+        return json.loads(raw, parse_float=Decimal)
+
     async def _list(self, endpoint, **params):
         payload = json.loads(await self._request(endpoint, **params), parse_float=Decimal)
         if payload["status"] == "013":
@@ -166,7 +172,7 @@ class DartETL:
         """Return False for excluded/unmapped securities or an already running issuer."""
         if start > end:
             raise ValueError("start must precede end")
-        async with await psycopg.AsyncConnection.connect() as conn:
+        async with db.connection() as conn:
             cursor = await conn.execute(
                 "SELECT corp_code FROM stock_master WHERE stock_code = %s "
                 "AND asset_type = 'STOCK' AND corp_code IS NOT NULL", (stock_code,))
@@ -204,7 +210,7 @@ class DartETL:
             rows, _ = await self._list(endpoint, **params)
             events.extend(parse_event(corp_code, kind, row) for row in rows)
         if events:
-            async with await psycopg.AsyncConnection.connect() as conn, conn.cursor() as cursor:
+            async with db.connection() as conn, conn.cursor() as cursor:
                 await cursor.executemany(UPSERT_EVENT, events)
 
         page = 1
@@ -220,24 +226,26 @@ class DartETL:
 
     async def _index_report(self, corp_code, report):
         receipt = _receipt(report["rcept_no"])
-        async with await psycopg.AsyncConnection.connect() as conn:
+        async with db.connection() as conn:
             cursor = await conn.execute("SELECT 1 FROM dart_chunks WHERE rcept_no = %s LIMIT 1", (receipt,))
             if await cursor.fetchone():
                 return  # Receipts are immutable; a correction has its own receipt.
         data = await self._request("document.xml", rcept_no=receipt)
         chunks = await asyncio.to_thread(_document_chunks, data)
         report_date = date.fromisoformat(report["rcept_dt"])
-        # One transaction per receipt. A failed batch leaves no partial searchable filing.
-        async with await psycopg.AsyncConnection.connect() as conn, conn.cursor() as cursor:
-            for start in range(0, len(chunks), dart_rag.BATCH_SIZE):
-                batch = chunks[start:start + dart_rag.BATCH_SIZE]
-                vectors = await dart_rag.embed(batch)
-                rows = []
-                for i, (text, vector) in enumerate(zip(batch, vectors, strict=True), start):
-                    tokens = await dart_rag.keywords(text)
-                    rows.append((corp_code, receipt, i, report["report_nm"], report_date,
-                                 text, json.dumps(vector, allow_nan=False), " ".join(tokens)))
-                await cursor.executemany(INSERT_CHUNK, rows)
+        # Embed before opening a transaction. GPU inference is serialized and slow, and a
+        # pooled connection must not sit idle in a transaction while it waits.
+        rows = []
+        for start in range(0, len(chunks), dart_rag.BATCH_SIZE):
+            batch = chunks[start:start + dart_rag.BATCH_SIZE]
+            vectors = await dart_rag.embed(batch)
+            for i, (text, vector) in enumerate(zip(batch, vectors, strict=True), start):
+                tokens = await dart_rag.keywords(text)
+                rows.append((corp_code, receipt, i, report["report_nm"], report_date,
+                             text, json.dumps(vector, allow_nan=False), " ".join(tokens)))
+        # One transaction per receipt. A failed embedding or insert leaves no partial searchable filing.
+        async with db.connection() as conn, conn.cursor() as cursor:
+            await cursor.executemany(INSERT_CHUNK, rows)
 
 
 def migrate():

@@ -1,5 +1,5 @@
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from decimal import DecimalException
 import logging
 import os
@@ -11,14 +11,18 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, StringConstraints
 from redis.exceptions import RedisError
 
-from backend.broker import BrokerConfigurationError, BrokerConnector, BrokerError, candle_poll_delay
+from backend import db
+from backend.broker import BrokerConfigurationError, BrokerConnector, BrokerError
 from backend.connectors import ExternalConnectors
 from backend.dart_etl import DartETL
-from backend.portfolio_graph import account_view, build_graph
-from backend.portfolio_market import MarketData, search_stocks
+from backend.market_time import candle_poll_delay
+from backend.portfolio_graph import build_graph
+from backend.portfolio_market import MarketData
 from backend.price_bands import StockPriceUnavailable, price_band_updates, stock_price_band_updates
-from backend.stock_analysis import dump
-from backend.toss_broker import TossBrokerConnector, TossSettings
+from backend.report import account_view
+from backend.serialization import dump
+from backend.stock_master import search_stocks
+from backend.toss_broker import TossSettings, toss_account
 
 
 logger = logging.getLogger(__name__)
@@ -41,12 +45,16 @@ async def keep_krx_session(market_data, interval=300, margin=900):
 async def lifespan(app: FastAPI):
     provider = os.getenv("BROKER_PROVIDER", "toss").strip().lower()
     if provider == "toss":
-        connector = TossBrokerConnector.from_env(toss_settings=TossSettings.from_env())
+        connector = BrokerConnector.from_env(account=toss_account(TossSettings.from_env()))
     elif provider == "kis":
         connector = BrokerConnector.from_env()
     else:
         raise ValueError("BROKER_PROVIDER must be toss or kis")
-    async with connector as broker:
+    async with AsyncExitStack() as resources:
+        # Exit runs in reverse: ETL tasks stop, then the broker clients, then the pool.
+        await db.open_pool()
+        resources.push_async_callback(db.close_pool)
+        broker = await resources.enter_async_context(connector)
         app.state.broker = broker
         app.state.dart_etl = DartETL(broker.redis, broker.http, os.getenv("DART_API_KEY"))
         app.state.external_connectors = ExternalConnectors.from_env(broker.http, broker.redis)
@@ -170,7 +178,12 @@ async def chat_events(graph, query):
                 if node.startswith("__") or (started and node == "router_node"):
                     continue
                 phase = "started" if started else ("failed" if data.get("error") else "completed")
-                yield sse("status", {"node": node, "phase": phase, "task_id": data["id"]})
+                status = {"node": node, "phase": phase, "task_id": data["id"]}
+                if started and node == "stock_worker":
+                    # Name the stock once; the client keeps it for this task's later phases.
+                    stock = data["input"]["stock"]
+                    status.update(stock_code=stock["stock_code"], stock_name=stock["name"])
+                yield sse("status", status)
             elif mode == "custom":
                 yield sse("token", data)
             elif mode == "values":

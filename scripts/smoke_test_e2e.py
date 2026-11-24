@@ -73,7 +73,7 @@ def fixture_graph(first_status_received):
         return balance
 
     async def collect():
-        return await get_balance(), as_of, None, {STOCK.stock_code: inputs}
+        return await get_balance(), as_of, None, {STOCK.stock_code: inputs}, []
 
     market = SimpleNamespace(
         broker=SimpleNamespace(get_balance=get_balance, http=None),
@@ -107,7 +107,8 @@ async def run_backend(client, first_status_received):
     with (
         patch.object(app.router, "lifespan_context", fixture_lifespan),
         patch.object(dart_rag, "search", AsyncMock(return_value=rows)),
-        patch.object(llm, "invoke", AsyncMock(side_effect=llm.LLMUnavailable)),
+        patch.object(llm, "invoke", AsyncMock(side_effect=llm.LLMUnavailable(
+            "Smoke test blocks cloud LLM calls", reason="오프라인 스모크 테스트"))),
         patch.object(stock_analysis, "analyze", AsyncMock(return_value=answer)),
         socket.socket() as listener,
     ):

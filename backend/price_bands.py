@@ -1,7 +1,7 @@
 """One-month price scenarios, with a local result before disclosure synthesis."""
 
 import asyncio
-from datetime import time, timedelta
+from datetime import timedelta
 from decimal import Decimal, ROUND_HALF_UP
 import logging
 import re
@@ -9,9 +9,11 @@ import re
 from pydantic import BaseModel, Field
 
 from backend import dart_rag, llm
-from backend.broker import KST
-from backend.portfolio_market import stock_master
-from backend.stock_analysis import ALIAS, RECEIPT, Analysis, dump
+from backend.market_time import KST, confirmed_day
+from backend.stock_master import fetch_stocks
+from backend.citations import ALIAS, RECEIPT, AliasBook
+from backend.serialization import dump
+from backend.stock_analysis import Analysis
 
 
 logger = logging.getLogger(__name__)
@@ -135,13 +137,13 @@ def enrich_band(band, reasons, references):
 
 
 async def stock_price_band_updates(market, stock_code):
-    stock = (await stock_master([stock_code])).get(stock_code)
+    stock = (await fetch_stocks([stock_code])).get(stock_code)
     if stock is None:
         raise StockPriceUnavailable("등록된 종목을 찾을 수 없습니다.")
 
     broker = market.broker
     now = broker.clock().astimezone(KST)
-    end = now.date() - timedelta(days=now.time() < time(15, 40))
+    end = confirmed_day(now)
     quote, bars, flow = await asyncio.gather(
         optional_data(broker.get_quote(stock_code, asset_type=stock.asset_type), 10),
         optional_data(broker.get_daily_bars(stock_code, end - timedelta(days=60), end,
@@ -187,7 +189,7 @@ async def stock_price_band_updates(market, stock_code):
 async def price_band_updates(market):
     balance = await market.broker.get_balance()
     now = market.broker.clock().astimezone(KST)
-    end = now.date() - timedelta(days=now.time() < time(15, 40))
+    end = confirmed_day(now)
 
     async def collect(holding):
         bars, flow = await asyncio.gather(
@@ -214,18 +216,17 @@ async def price_band_updates(market):
 
 
 async def enrich_bands(rows):
-    contexts, targets, aliases = [], [], {}
+    # One prompt covers every band, so all bands share one alias namespace.
+    contexts, targets, book = [], [], AliasBook()
     for band, signals, chunks in rows:
         if not chunks:
             continue
         documents, references = [], {}
         for row in chunks:
-            receipt = row["rcept_no"]
-            alias = aliases.setdefault(receipt, f"DOC-{len(aliases) + 1}")
-            title = RECEIPT.sub("(공시번호 생략)", row["report_nm"])
-            documents.append({"source": alias, "title": title,
-                              "text": RECEIPT.sub("(공시번호 생략)", row["chunk_text"])})
-            references[alias] = {"alias": alias, "title": title, "receipt": receipt}
+            document = book.document(row)
+            documents.append(document)
+            references[document["source"]] = {"alias": document["source"], "title": document["title"],
+                                              "receipt": row["rcept_no"]}
         contexts.append({**signals, "disclosures": documents})
         targets.append((band, references))
 

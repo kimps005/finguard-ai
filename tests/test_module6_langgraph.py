@@ -12,7 +12,7 @@ import pytest
 
 from backend import dart_rag, llm, portfolio_market, stock_analysis
 from backend.broker import (
-    KST, LIVE, VIRTUAL, Balance, BrokerConnector, BrokerSettings, Credentials, DailyBar,
+    KST, LIVE, VIRTUAL, Balance, BrokerConnector, BrokerError, BrokerSettings, Credentials, DailyBar,
     FiveDayFlow, Holding, InvestorFlow,
 )
 from backend.connectors import ExternalConnectors
@@ -55,7 +55,7 @@ def setup_market(monkeypatch, positions):
     external.get_news.return_value = [{"title": "종목 뉴스", "description": "배당 관련 보도"}]
     stocks = {h.stock_code: Stock(h.stock_code, h.corp_code, h.isin_cd, None, h.name, h.asset_type,
                                   "261", D(10000)) for h in positions}
-    monkeypatch.setattr(portfolio_market, "stock_master", AsyncMock(return_value=stocks))
+    monkeypatch.setattr(portfolio_market, "fetch_stocks", AsyncMock(return_value=stocks))
     event = {"corp_code": "00000001", "rcept_no": RECEIPT, "event_type": "CB",
              "board_resolution_date": DAY, "convertible_shares": 10}
     monkeypatch.setattr(portfolio_market, "outstanding_events", AsyncMock(return_value=[event]))
@@ -219,7 +219,7 @@ def test_fast_path_stream_and_latency(monkeypatch):
     market.broker.get_balance.assert_awaited_once_with()
     assert not market.etl.method_calls and not market.external.method_calls
     assert not market.broker.get_five_day_flow.called and not dart_rag.search.called
-    portfolio_market.stock_master.assert_not_called()
+    portfolio_market.fetch_stocks.assert_not_called()
     llm.ChatOpenAI.assert_called_once()
     llm.ChatGoogleGenerativeAI.assert_not_called()
 
@@ -442,3 +442,82 @@ def test_real_langchain_adapters_parse_gemini_fallback(monkeypatch):
     assert asyncio.run(stock_analysis.analyze('{"name":"가상 종목"}')) == {"analysis_text": "공시 분석", "citations": []}
     dash.assert_awaited_once()
     google.assert_awaited_once()
+
+
+def test_done_event_exposes_every_public_state_field_and_no_internal_one():
+    from backend.main import PUBLIC_FIELDS
+    from backend.portfolio_graph import PortfolioState
+
+    internal = {"user_query", "stock_analysis_results", "balance", "as_of", "score_inputs"}
+    assert set(PUBLIC_FIELDS) == set(PortfolioState.__annotations__) - internal
+
+
+def test_one_failing_source_degrades_only_its_holding(monkeypatch):
+    market = setup_market(monkeypatch, [position("000001", weight="0.3"), position("000002", weight="0.4")])
+    flow = market.broker.get_five_day_flow.return_value
+
+    async def five_day_flow(code, **kwargs):
+        if code == "000002":  # e.g. a new listing without five confirmed sessions
+            raise BrokerError("Five confirmed KRX sessions are not available")
+        return flow
+
+    market.broker.get_five_day_flow.side_effect = five_day_flow
+    market.etl.ingest_stock.side_effect = RuntimeError("DART list.json returned HTTP 500")
+    portfolio_market.financial_reports.side_effect = RuntimeError("DART fnlttSinglAcntAll failed")
+
+    async def stream():
+        return [parse_frame(frame) async for frame in chat_events(build_graph(market), "포트폴리오 위험 진단")]
+
+    events = asyncio.run(stream())
+    event, done = events[-1]
+    assert event == "done" and done["ok"] is True
+    assert done["quant_scorecards"]["000002"] == {"status": "unavailable"}
+    card = done["quant_scorecards"]["000001"]
+    assert card["scores"]["flow"] is not None and card["scores"]["earnings"] is None and card["total"] is None
+    # Only the holding with score inputs is fanned out; the other keeps its broker mapping.
+    assert [row["stock_code"] for row in done["verified_stock_results"]] == ["000001"]
+    assert {row["stock_code"]: row["asset_type"] for row in done["holdings"]} == {"000001": "STOCK", "000002": "STOCK"}
+    warnings = done["guardrail_warnings"]
+    assert "종목000002 최근 5거래일 확정 수급을 불러오지 못해 정량 점수에서 제외했습니다." in warnings
+    assert "종목000001 최신 공시 적재가 끝나지 않아 저장된 공시로 분석했습니다." in warnings
+    assert "종목000001 재무제표를 불러오지 못해 실적 점수를 산정하지 않았습니다." in warnings
+    assert len(warnings) == len(set(warnings))
+    assert "종목000002" in done["final_report"]
+
+
+def test_slow_dart_ingest_is_bounded(monkeypatch):
+    market = setup_market(monkeypatch, [position("000001")])
+    monkeypatch.setattr(portfolio_market, "INGEST_TIMEOUT", 0.05)
+    cancelled = []
+
+    async def stuck(*args):
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    market.etl.ingest_stock.side_effect = stuck
+    started = perf_counter()
+    result = asyncio.run(build_graph(market).ainvoke({"user_query": "포트폴리오 위험 진단"}))
+    assert perf_counter() - started < 10 and cancelled == [True]
+    assert any("최신 공시 적재" in warning for warning in result["guardrail_warnings"])
+    # Events already in the database still feed the overhang score.
+    assert result["quant_scorecards"]["000001"]["dilution_pct"] is not None
+
+
+def test_worker_status_events_name_their_stock_once(monkeypatch):
+    market = setup_market(monkeypatch, [position("000001", weight="0.3"), position("000002", weight="0.4")])
+
+    async def stream():
+        return [parse_frame(frame) async for frame in chat_events(build_graph(market), "포트폴리오 위험 진단")]
+
+    workers = [data for event, data in asyncio.run(stream())
+               if event == "status" and data["node"] == "stock_worker"]
+    started = {d["task_id"]: d for d in workers if d["phase"] == "started"}
+    assert sorted((d["stock_code"], d["stock_name"]) for d in started.values()) == [
+        ("000001", "종목000001"), ("000002", "종목000002")]
+    completed = [d for d in workers if d["phase"] == "completed"]
+    assert {d["task_id"] for d in completed} == set(started) and all("stock_code" not in d for d in completed)
+    # Other nodes carry no stock fields, and nothing from the user's query leaks into statuses.
+    assert all(set(d) == {"node", "phase", "task_id", "stock_code", "stock_name"} for d in started.values())

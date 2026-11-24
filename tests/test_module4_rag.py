@@ -1,21 +1,17 @@
 import asyncio
-from contextlib import nullcontext
+from contextlib import asynccontextmanager
 from datetime import date
 from decimal import Decimal
 from io import BytesIO
 import json
-import os
-from pathlib import Path
 import sys
 import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
 from zipfile import ZipFile
 
 import httpx
 import numpy as np
-import psycopg
 import pytest
 
 from backend import dart_etl as etl, dart_rag as rag
@@ -25,7 +21,6 @@ from backend.dart_chunks import chunk_document
 CORP = "00126380"
 RECEIPT = "20260115000001"
 DAY = date(2026, 1, 15)
-MIGRATIONS = Path(__file__).resolve().parents[1] / "backend" / "migrations"
 VECTOR = [1] + [0] * 1023
 
 
@@ -34,49 +29,6 @@ def run(coro):
         with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
             return runner.run(coro)
     return asyncio.run(coro)
-
-
-@pytest.fixture(scope="module")
-def database(tmp_path_factory):
-    """Use an ephemeral PostgreSQL or a supplied test DSN, in a private schema."""
-    dsn = os.getenv("MODULE4_TEST_DSN")
-    if dsn:
-        server = nullcontext()
-    else:
-        from embedded_postgres import get_server
-
-        server = get_server(tmp_path_factory.mktemp("module4-pg"))
-    schema = "test_module4_" + uuid4().hex
-    with server as pg:
-        dsn = dsn or pg.get_uri()
-        with psycopg.connect(dsn, autocommit=True, prepare_threshold=None) as conn:
-            conn.execute(f"CREATE SCHEMA {schema}")
-            try:
-                conn.execute(f"SET search_path TO {schema}, public")
-                for migration in ["001_module1.sql", "004_module4.sql", "004_module4.sql"]:
-                    conn.execute((MIGRATIONS / migration).read_text(encoding="utf-8"))
-                yield dsn, schema
-            finally:
-                conn.rollback()
-                conn.execute(f"DROP SCHEMA {schema} CASCADE")
-
-
-@pytest.fixture
-def db(database, monkeypatch):
-    dsn, schema = database
-    connect = psycopg.AsyncConnection.connect
-
-    async def connect_test(**kwargs):
-        connection = await connect(dsn, prepare_threshold=None, **kwargs)
-        await connection.execute(f"SET search_path TO {schema}, public")
-        await connection.commit()
-        return connection
-
-    monkeypatch.setattr(psycopg.AsyncConnection, "connect", connect_test)
-    with psycopg.connect(dsn, autocommit=True, prepare_threshold=None) as conn:
-        conn.execute(f"SET search_path TO {schema}, public")
-        conn.execute("TRUNCATE stock_master, dart_chunks, overhang_events")
-        yield conn
 
 
 def bond(**changes):
@@ -213,7 +165,8 @@ def test_exact_hybrid_candidates_are_scoped_before_limit_and_reranked(db, monkey
     with db.transaction():
         db.execute("SET LOCAL enable_seqscan = off")
         plan = db.execute("EXPLAIN " + rag.HYBRID_SQL, {"corp": CORP, "terms": "전환",
-                          "vector": json.dumps(VECTOR), "candidates": 2}).fetchall()
+                          "vector": json.dumps(VECTOR), "candidates": 2,
+                          "since": None, "until": None}).fetchall()
         assert "idx_dart_chunks_corp" in str(plan) and "CTE Scan" in str(plan)
         gin = db.execute("EXPLAIN SELECT * FROM dart_chunks WHERE search_tsv @@ "
                          "plainto_tsquery('simple','전환')").fetchall()
@@ -348,3 +301,32 @@ def test_failed_embedding_rolls_back_entire_receipt_and_can_retry(db, monkeypatc
     assert db.execute("SELECT count(*) FROM dart_chunks").fetchone() == (0,)
     run(service._index_report(CORP, report))
     assert db.execute("SELECT count(*) FROM dart_chunks").fetchone() == (9,)
+
+
+def test_embedding_runs_without_holding_a_database_connection(db, monkeypatch):
+    archive = BytesIO()
+    with ZipFile(archive, "w") as package:
+        package.writestr("filing.xml", "<p>전환사채 발행 결정</p>")
+    service = etl.DartETL(None, None, "test")
+    monkeypatch.setattr(service, "_request", AsyncMock(return_value=archive.getvalue()))
+    monkeypatch.setattr(rag, "keywords", AsyncMock(return_value=["전환"]))
+    open_connections = []
+    connection = etl.db.connection
+
+    @asynccontextmanager
+    async def tracked(**kwargs):
+        open_connections.append(1)
+        try:
+            async with connection(**kwargs) as conn:
+                yield conn
+        finally:
+            open_connections.pop()
+
+    async def embed(texts):
+        assert not open_connections, "GPU inference must not run inside a DB transaction"
+        return [VECTOR] * len(texts)
+
+    monkeypatch.setattr(etl.db, "connection", tracked)
+    monkeypatch.setattr(rag, "embed", embed)
+    run(service._index_report(CORP, {"rcept_no": RECEIPT, "rcept_dt": "20260115", "report_nm": "발행결정"}))
+    assert db.execute("SELECT count(*) FROM dart_chunks").fetchone() == (1,)

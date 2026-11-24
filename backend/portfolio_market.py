@@ -4,16 +4,23 @@ import asyncio
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
 from decimal import Decimal
-import json
+import logging
 
-import psycopg
 from psycopg.rows import dict_row
 
-from backend.broker import KST, BrokerConnector, DailyBar, FiveDayFlow, Holding
+from backend import db
+from backend.broker import BrokerConnector, DailyBar, FiveDayFlow, Holding
 from backend.connectors import ExternalConnectors
 from backend.dart_etl import DartETL
 from backend.finance_calc import ANNUAL, THIRD, DartReports, LockupRelease
+from backend.market_time import KST, confirmed_day
+from backend.stock_master import fetch_stocks
 from backend.sync_stock_master import Stock
+
+
+logger = logging.getLogger(__name__)
+# Cold-cache ingestion must leave room for the workers within the PRD's 25-second budget.
+INGEST_TIMEOUT = 15
 
 
 @dataclass
@@ -26,36 +33,8 @@ class ScoreInputs:
     events: list[dict] | None = None
 
 
-async def stock_master(codes: list[str]) -> dict[str, Stock]:
-    if not codes:
-        return {}
-    async with await psycopg.AsyncConnection.connect(row_factory=dict_row) as conn:
-        cursor = await conn.execute(
-            "SELECT stock_code, corp_code, isin_cd, crno, corp_name, asset_type, induty_code, "
-            "listed_shares::numeric FROM stock_master WHERE stock_code = ANY(%s)", (codes,))
-        return {row["stock_code"]: Stock(**row) for row in await cursor.fetchall()}
-
-
-async def search_stocks(query: str) -> list[dict]:
-    if not query:
-        return []
-    async with await psycopg.AsyncConnection.connect(row_factory=dict_row) as conn:
-        cursor = await conn.execute(
-            """SELECT stock_code, corp_name, market
-               FROM stock_master
-               WHERE stock_code = upper(%(q)s)
-                  OR strpos(lower(corp_name), lower(%(q)s)) > 0
-               ORDER BY CASE WHEN stock_code = upper(%(q)s) THEN 0
-                             WHEN lower(corp_name) = lower(%(q)s) THEN 1
-                             WHEN starts_with(lower(corp_name), lower(%(q)s)) THEN 2
-                             ELSE 3 END,
-                        length(corp_name), stock_code
-               LIMIT 8""", {"q": query})
-        return await cursor.fetchall()
-
-
 async def outstanding_events(corp_code: str, on: date) -> list[dict]:
-    async with await psycopg.AsyncConnection.connect(row_factory=dict_row) as conn:
+    async with db.connection(row_factory=dict_row) as conn:
         cursor = await conn.execute(
             "SELECT corp_code, event_type, convertible_shares, conversion_price, "
             "board_resolution_date, exercise_start_date, exercise_end_date, rcept_no "
@@ -69,9 +48,7 @@ async def financial_reports(etl: DartETL, corp_code: str, on: date) -> DartRepor
     reports = {}
 
     async def load(year, period, basis):
-        raw = await etl._request("fnlttSinglAcntAll.json", corp_code=corp_code,
-                                 bsns_year=str(year), reprt_code=period, fs_div=basis)
-        reports[year, period, basis] = json.loads(raw, parse_float=Decimal)
+        reports[year, period, basis] = await etl.financial_statement(corp_code, year, period, basis)
 
     for year in (on.year - 1, on.year - 2):
         for basis in ("CFS", "OFS"):
@@ -94,26 +71,51 @@ class MarketData:
         self.external = external
 
     async def collect(self):
+        """Gather one snapshot; a failing source degrades its holding instead of the diagnosis.
+
+        Only the balance and stock_master lookups are fatal. Every other source records a
+        Korean warning and leaves its score input unknown, so the scorecard leaves that part
+        (and the total) unset rather than guessing.
+        """
         now = self.broker.clock().astimezone(KST)
         on = now.date()
+        warnings: list[str] = []
+
+        async def optional(operation, warning, default=None):
+            try:
+                return await operation
+            except Exception as exc:  # CancelledError is not an Exception and still propagates.
+                logger.warning("Score input unavailable (%s)", type(exc).__name__)
+                warnings.append(warning)
+                return default
 
         async def issuer_data(stock):
-            # Module 4 owns the issuer lock, index and correction-safe event upserts.
-            await self.etl.ingest_stock(stock.stock_code, on - timedelta(days=90), on)
-            return await outstanding_events(stock.corp_code, on)
+            # Module 4 owns the issuer lock, index and correction-safe event upserts. A timed-out
+            # ingest keeps the receipts it finished; the next request resumes from there.
+            async def ingest():
+                async with asyncio.timeout(INGEST_TIMEOUT):
+                    await self.etl.ingest_stock(stock.stock_code, on - timedelta(days=90), on)
+
+            await optional(ingest(), f"{stock.corp_name} 최신 공시 적재가 끝나지 않아 저장된 공시로 분석했습니다.")
+            return await optional(outstanding_events(stock.corp_code, on),
+                                  f"{stock.corp_name} 오버행 이벤트를 불러오지 못해 오버행 점수를 산정하지 않았습니다.")
 
         async def score_inputs(stock, issuer):
-            code = stock.stock_code
+            code, name = stock.stock_code, stock.corp_name
             async with asyncio.TaskGroup() as group:
-                flow = group.create_task(self.broker.get_five_day_flow(
-                    code, as_of=now, asset_type=stock.asset_type))
+                flow = group.create_task(optional(
+                    self.broker.get_five_day_flow(code, as_of=now, asset_type=stock.asset_type),
+                    f"{name} 최근 5거래일 확정 수급을 불러오지 못해 정량 점수에서 제외했습니다."))
                 if stock.asset_type == "STOCK":
                     # Both MA windows must end on a completed trading session.
-                    end = on - timedelta(days=(now.hour, now.minute) < (15, 40))
-                    bars = group.create_task(self.broker.get_daily_bars(
-                        code, end - timedelta(days=60), end, asset_type=stock.asset_type))
+                    end = confirmed_day(now)
+                    bars = group.create_task(optional(
+                        self.broker.get_daily_bars(code, end - timedelta(days=60), end, asset_type=stock.asset_type),
+                        f"{name} 일봉을 불러오지 못해 모멘텀 점수를 산정하지 않았습니다.", ()))
                     events = await issuer if issuer else None
                     lockup = group.create_task(self.external.get_lockup(asdict(stock), as_of=on))
+            if flow.result() is None:
+                return None
             inputs = ScoreInputs(stock, flow.result())
             if stock.asset_type == "STOCK":
                 inputs.bars = bars.result()
@@ -123,21 +125,24 @@ class MarketData:
             return inputs
 
         async with asyncio.TaskGroup() as group:
-            macro = group.create_task(self.external.get_macro_context(as_of=on))
+            macro = group.create_task(optional(self.external.get_macro_context(as_of=on),
+                                               "환율·금리 자료를 불러오지 못했습니다."))
             balance = await self.broker.get_balance()
-            master = await stock_master([item.stock_code for item in balance.holdings])
+            master = await fetch_stocks([item.stock_code for item in balance.holdings])
             issuers, reports, jobs = {}, {}, {}
             for code, stock in master.items():
                 corp = stock.corp_code
                 if stock.asset_type == "STOCK" and corp and corp not in issuers:
                     issuers[corp] = group.create_task(issuer_data(stock))
-                    reports[corp] = group.create_task(financial_reports(self.etl, corp, on))
+                    reports[corp] = group.create_task(optional(
+                        financial_reports(self.etl, corp, on),
+                        f"{stock.corp_name} 재무제표를 불러오지 못해 실적 점수를 산정하지 않았습니다."))
                 jobs[code] = group.create_task(score_inputs(stock, issuers.get(corp)))
-        inputs = {code: job.result() for code, job in jobs.items()}
+        inputs = {code: job.result() for code, job in jobs.items() if job.result() is not None}
         for item in inputs.values():
             if item.stock.corp_code in reports:
                 item.reports = reports[item.stock.corp_code].result()
-        return balance, on, macro.result(), inputs
+        return balance, on, macro.result(), inputs, list(dict.fromkeys(warnings))
 
     async def orderable_cash(self, holding: Holding | None = None) -> Decimal:
         return await self.broker.get_orderable_cash(holding)

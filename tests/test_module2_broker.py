@@ -10,10 +10,13 @@ import httpx
 import pandas as pd
 import pytest
 
-from backend.broker import BrokerConfigurationError, BrokerConnector, BrokerError, BrokerSettings, KST, LIVE, VIRTUAL
+from backend.broker import (
+    KST, LIVE, VIRTUAL, BrokerConfigurationError, BrokerConnector, BrokerError, BrokerSettings, KisAccount,
+)
 from backend.main import app
 from backend.portfolio_market import MarketData
-from backend.toss_broker import TossBrokerConnector, TossSettings
+from backend.sync_stock_master import Stock
+from backend.toss_broker import TossAccount, TossSettings, toss_account
 
 
 class MemoryRedis:
@@ -53,6 +56,10 @@ def settings(monkeypatch):
     return BrokerSettings.from_env()
 
 
+def stock(code, asset_type, corp_code):
+    return Stock(code, corp_code, "KR7" + code + "000", None, "종목" + code, asset_type, None, Decimal(1000))
+
+
 def market_rows():
     return [
         {"stck_bsop_date": session.strftime("%Y%m%d"), "frgn_ntby_qty": str(index),
@@ -69,7 +76,7 @@ def test_toss_snapshot_and_cash_use_documented_read_only_api(settings, monkeypat
         "marketValue": {"purchaseAmount": "200.3125", "amount": "250.625"},
         "profitLoss": {"amount": "50.3125", "rate": "0.25117"},
     }
-    master = AsyncMock(return_value={"005930": ("STOCK", "00123456", "common")})
+    master = AsyncMock(return_value={"005930": stock("005930", "STOCK", "00123456")})
 
     def handle(request):
         path = request.url.path
@@ -99,9 +106,9 @@ def test_toss_snapshot_and_cash_use_documented_read_only_api(settings, monkeypat
 
     async def read():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
-            connector = TossBrokerConnector(settings, MemoryRedis(), http,
-                                            toss_settings=TossSettings("client-id", "client-secret"),
-                                            stock_master=master)
+            connector = BrokerConnector(settings, MemoryRedis(), http,
+                                        account=toss_account(TossSettings("client-id", "client-secret")),
+                                        stock_master=master)
             monkeypatch.setattr(app.state, "market", MarketData(connector, None, None), raising=False)
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                          base_url="http://local") as client:
@@ -122,20 +129,22 @@ def test_toss_snapshot_and_cash_use_documented_read_only_api(settings, monkeypat
 
 
 def test_toss_requires_account_selection_when_multiple_accounts_are_linked(settings):
-    broker = TossBrokerConnector(settings, MemoryRedis(), None, toss_settings=TossSettings("id", "secret"))
-    broker._toss_get = AsyncMock(return_value=[
+    broker = BrokerConnector(settings, MemoryRedis(), None, account=toss_account(TossSettings("id", "secret")))
+    assert isinstance(broker.account, TossAccount)
+    broker.account._get = AsyncMock(return_value=[
         {"accountSeq": seq, "accountType": "BROKERAGE"} for seq in (2, 7)
     ])
     with pytest.raises(BrokerConfigurationError, match="toss_account_selection_required"):
         asyncio.run(broker.get_balance())
-    broker._toss_get.assert_awaited_once_with("/api/v1/accounts")
+    broker.account._get.assert_awaited_once_with("/api/v1/accounts")
 
-    configured = TossBrokerConnector(settings, MemoryRedis(), None, toss_settings=TossSettings("id", "secret", "7"))
-    configured._toss_get = AsyncMock(side_effect=[
-        broker._toss_get.return_value, {"cashBuyingPower": "42"},
+    configured = BrokerConnector(settings, MemoryRedis(), None,
+                                 account=toss_account(TossSettings("id", "secret", "7")))
+    configured.account._get = AsyncMock(side_effect=[
+        broker.account._get.return_value, {"cashBuyingPower": "42"},
     ])
     assert asyncio.run(configured.get_orderable_cash()) == Decimal(42)
-    assert configured._toss_get.await_args.kwargs == {"account_seq": "7", "params": {"currency": "KRW"}}
+    assert configured.account._get.await_args.kwargs == {"account_seq": "7", "params": {"currency": "KRW"}}
 
 
 @pytest.mark.parametrize("is_virtual", [True, False])
@@ -144,10 +153,10 @@ def test_account_domain_and_market_domains(settings, monkeypatch, is_virtual):
     settings = BrokerSettings.from_env()
     request_log = []
     master = AsyncMock(return_value={
-        "005930": ("STOCK", "00123456", "common"),
-        "005935": ("STOCK", "00123456", "preferred"),
-        "069500": ("ETF", None, "etf"),
-        "580001": ("ETN", None, "etn"),
+        "005930": stock("005930", "STOCK", "00123456"),
+        "005935": stock("005935", "STOCK", "00123456"),
+        "069500": stock("069500", "ETF", None),
+        "580001": stock("580001", "ETN", None),
     })
 
     async def handle(request):
@@ -387,7 +396,10 @@ def test_missing_flow_session_is_not_replaced_by_older_data(settings, monkeypatc
     assert "Five confirmed KRX sessions are not available" in str(caught.value.__cause__)
 
 
-def test_health_and_connector_lifespan(settings):
+@pytest.mark.parametrize("provider,account_type", [("toss", TossAccount), ("kis", KisAccount)])
+def test_health_and_connector_lifespan(settings, monkeypatch, provider, account_type):
+    monkeypatch.setenv("BROKER_PROVIDER", provider)
+
     async def run():
         async with app.router.lifespan_context(app), httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -395,5 +407,8 @@ def test_health_and_connector_lifespan(settings):
             response = await client.get("/health")
             assert response.json() == {"status": "ok"}
             assert app.state.broker.settings == settings
+            # Either account source shares the one connector for KRX market data.
+            assert type(app.state.broker.account) is account_type
+            assert app.state.broker.account.connector is app.state.broker
 
     asyncio.run(run())

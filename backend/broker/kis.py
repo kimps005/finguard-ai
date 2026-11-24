@@ -3,46 +3,32 @@
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, DecimalException
-from functools import lru_cache
 from hashlib import sha256
 import json
 import logging
 import os
-import threading
-import time as wall_clock
-from zoneinfo import ZoneInfo
 
-import exchange_calendars
 import httpx
-import psycopg
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
+from backend.broker.candles import aggregate_ten_minute_candles, candle_period_start, candle_values, fold_bar
+from backend.broker.models import (
+    ZERO, Balance, BrokerConfigurationError, BrokerError, Candle, DailyBar, FiveDayFlow, Holding,
+    InvestorFlow, Quote, RetryableBrokerError, day_string, master_identity, number, symbol,
+)
+from backend.broker.pykrx_source import PykrxMarketData
+from backend.market_time import KST, confirmed_day, krx_calendar
+from backend.stock_master import fetch_stocks
 
-KST = ZoneInfo("Asia/Seoul")
+
 LIVE = "https://openapi.koreainvestment.com:9443"
 VIRTUAL = "https://openapivts.koreainvestment.com:29443"
 DOMESTIC = "/uapi/domestic-stock/v1"
-ZERO = Decimal(0)
 RETRY_DELAYS = (0.25, 0.5, 1)
 logger = logging.getLogger(__name__)
-
-
-class BrokerError(RuntimeError):
-    pass
-
-
-class BrokerConfigurationError(BrokerError):
-    def __init__(self, code: str, mode: str):
-        self.code = code
-        self.mode = mode
-        super().__init__(f"{code} ({mode})")
-
-
-class RetryableBrokerError(BrokerError):
-    pass
 
 
 @dataclass(frozen=True)
@@ -73,209 +59,81 @@ class BrokerSettings:
         return cls(credentials("KIS_"), credentials("KIS_VIRTUAL_"), mode == "true")
 
 
-@dataclass(frozen=True)
-class Holding:
-    stock_code: str
-    name: str
-    asset_type: str | None
-    corp_code: str | None
-    isin_cd: str | None
-    quantity: Decimal
-    average_price: Decimal
-    current_price: Decimal
-    purchase_amount: Decimal
-    market_value: Decimal
-    profit_loss: Decimal
-    profit_loss_pct: Decimal
-    weight: Decimal
+class KisAccount:
+    """KIS domestic account on the virtual or live domain, chosen by IS_VIRTUAL."""
 
+    def __init__(self, connector):
+        self.connector = connector
 
-@dataclass(frozen=True)
-class Balance:
-    cash_deposit: Decimal | None
-    total_value: Decimal
-    cash_weight: Decimal | None
-    holdings: tuple[Holding, ...]
-
-
-@dataclass(frozen=True)
-class Quote:
-    stock_code: str
-    current_price: Decimal
-    source: str
-    session: date | None = None
-    change_pct: Decimal | None = None
-
-
-@dataclass(frozen=True)
-class DailyBar:
-    session: date
-    open: Decimal
-    high: Decimal
-    low: Decimal
-    close: Decimal
-    volume: Decimal
-
-
-@dataclass
-class Candle:
-    time: date | int
-    open: Decimal
-    high: Decimal
-    low: Decimal
-    close: Decimal
-    volume: Decimal
-
-
-@dataclass(frozen=True)
-class InvestorFlow:
-    session: date
-    foreign_net_buy: Decimal
-    institution_net_buy: Decimal
-
-
-@dataclass(frozen=True)
-class FiveDayFlow:
-    days: tuple[InvestorFlow, ...]
-    foreign_net_buy: Decimal
-    institution_net_buy: Decimal
-
-    @property
-    def as_of(self) -> date:
-        return self.days[-1].session
-
-
-def number(value) -> Decimal:
-    parsed = Decimal(str(value).strip().replace(",", ""))
-    if not parsed.is_finite():
-        raise ValueError("Non-finite broker number")
-    return parsed
-
-
-def candle_values(row, close_field, volume_field):
-    try:
-        values = tuple(number(row[field]) for field in (
-            "stck_oprc", "stck_hgpr", "stck_lwpr", close_field, volume_field,
-        ))
-    except (KeyError, ValueError, DecimalException):
-        return None
-    if min(values[:4]) > ZERO and values[4] >= ZERO:
-        return values
-
-
-def candle_period_start(session: date, period: str) -> date:
-    if period == "Y":
-        return session.replace(month=1, day=1)
-    if period == "W":
-        return session - timedelta(days=session.weekday())
-    return session
-
-
-def aggregate_ten_minute_candles(rows) -> list[Candle]:
-    candles: dict[int, Candle] = {}
-    for stamp, (open_, high, low, close, volume) in sorted(rows.items()):
-        bucket = stamp // 600 * 600
-        candle = candles.get(bucket)
-        if candle is None:
-            candles[bucket] = Candle(bucket, open_, high, low, close, volume)
-        else:
-            candle.high = max(candle.high, high)
-            candle.low = min(candle.low, low)
-            candle.close = close
-            candle.volume += volume
-    return list(candles.values())
-
-
-def symbol(code: str) -> str:
-    code = code.strip()
-    if len(code) == 7 and code[0] in {"A", "Q"}:
-        return code[1:]
-    return code
-
-
-def day_string(value: date) -> str:
-    return value.strftime("%Y%m%d")
-
-
-@lru_cache(maxsize=1)
-def krx_calendar():
-    return exchange_calendars.get_calendar("XKRX")
-
-
-def candle_poll_delay(now: datetime) -> int:
-    calendar = krx_calendar()
-    session = calendar.date_to_session(now.astimezone(KST).date(), direction="next")
-    if now >= calendar.session_close(session) + timedelta(seconds=30):
-        session = calendar.next_session(session)
-    wait = calendar.session_open(session) - now
-    return max(15, wait.days * 86400 + wait.seconds + 1)
-
-
-async def load_stock_master(codes: list[str]) -> dict:
-    if not codes:
-        return {}
-    async with await psycopg.AsyncConnection.connect() as connection:
-        cursor = await connection.execute(
-            "SELECT stock_code, asset_type, corp_code, isin_cd FROM stock_master "
-            "WHERE stock_code = ANY(%s)", (codes,)
+    async def get_balance(self) -> Balance:
+        virtual = self.connector.settings.is_virtual
+        domain, credentials, transaction = (
+            (VIRTUAL, self.connector.settings.virtual, "VTTC8434R") if virtual
+            else (LIVE, self.connector.settings.live, "TTTC8434R")
         )
-        return {code: (asset_type, corp_code, isin) for code, asset_type, corp_code, isin
-                in await cursor.fetchall()}
+        if not all((credentials.account_no, credentials.app_key, credentials.app_secret)):
+            raise BrokerConfigurationError("kis_account_not_configured", "virtual" if virtual else "live")
+        params = {
+            "CANO": credentials.account_no, "ACNT_PRDT_CD": credentials.product_code,
+            "AFHR_FLPR_YN": "N", "OFL_YN": "", "INQR_DVSN": "02", "UNPR_DVSN": "01",
+            "FUND_STTL_ICLD_YN": "N", "FNCG_AMT_AUTO_RDPT_YN": "N", "PRCS_DVSN": "00",
+        }
+        rows, cursors = [], set()
+        summary = None
+        cursor = ("", "")
+        continuation = ""
+        while True:
+            params["CTX_AREA_FK100"], params["CTX_AREA_NK100"] = cursor
+            body, headers = await self.connector._get(domain, credentials, "/trading/inquire-balance",
+                                            transaction, params, continuation)
+            rows.extend(body["output1"])
+            if summary is None and body.get("output2"):
+                summary = body["output2"][0]
+            if headers.get("tr_cont") not in {"F", "M"}:
+                break
+            cursor = tuple(body[field].strip() for field in ("ctx_area_fk100", "ctx_area_nk100"))
+            if not any(cursor) or cursor in cursors:
+                raise BrokerError("Invalid KIS balance continuation")
+            cursors.add(cursor)
+            continuation = "N"
+        if summary is None:
+            raise BrokerError("KIS balance summary is missing")
+        cash, total = (number(summary[field]) for field in ("dnca_tot_amt", "tot_evlu_amt"))
+        positions = [(row, number(row["hldg_qty"])) for row in rows]
+        positions = [(row, qty) for row, qty in positions if qty != ZERO]
+        master = await self.connector.stock_master(list(dict.fromkeys(symbol(row["pdno"]) for row, _ in positions)))
+        holdings = []
+        for row, quantity in positions:
+            code = symbol(row["pdno"])
+            asset_type, corp_code, isin = master_identity(master.get(code))
+            avg, price, cost, value, pnl, pnl_pct = (number(row[field]) for field in (
+                "pchs_avg_pric", "prpr", "pchs_amt", "evlu_amt", "evlu_pfls_amt", "evlu_pfls_rt",
+            ))
+            holdings.append(Holding(code, row["prdt_name"], asset_type, corp_code, isin, quantity,
+                                    avg, price, cost, value, pnl, pnl_pct, value / total if total else ZERO))
+        return Balance(cash, total, cash / total if total else ZERO, tuple(holdings))
 
-
-class PykrxMarketData:
-    """Synchronous adapter. BrokerConnector runs its calls off the event loop."""
-
-    _login_lock = threading.Lock()
-
-    def keep_session(self, margin=0):
-        """Log in to KRX once, serialized, and renew it when fewer than margin seconds remain."""
-        from pykrx.website.comm import auth
-
-        with self._login_lock:
-            session = auth.get_auth_session()
-            if session is not None and session.expiry_time - wall_clock.time() < margin:
-                session.refresh(os.getenv("KRX_ID"), os.getenv("KRX_PW"))
-
-    def daily(self, code, start, end, asset_type=None, *, adjusted=False):
-        from pykrx import stock
-
-        self.keep_session()
-
-        args = (day_string(start), day_string(end), code)
-        if asset_type == "ETF" and not adjusted:
-            frame = stock.get_etf_ohlcv_by_date(*args)
-        else:
-            # PyKRX's adjusted route uses Naver, which accepts ETN tickers.
-            frame = stock.get_market_ohlcv_by_date(*args, adjusted=adjusted or asset_type == "ETN")
-        if frame.empty:
-            return ()
-        columns = ["시가", "고가", "저가", "종가", "거래량"]
-        return tuple(DailyBar(index.date(), *(number(value) for value in values))
-                     for index, *values in frame[columns].itertuples(name=None))
-
-    def flow(self, code, start, end, asset_type=None):
-        from pykrx import stock
-
-        self.keep_session()
-
-        args = (day_string(start), day_string(end), code)
-        if asset_type in {"ETF", "ETN"}:
-            frame = stock.get_etf_trading_volume_and_value(*args, "거래량", "순매수")
-            columns = ["외국인", "기관"]
-        else:
-            frame = stock.get_market_trading_volume_by_date(*args)
-            columns = ["외국인합계", "기관합계"]
-        if frame.empty:
-            return ()
-        return tuple(InvestorFlow(index.date(), number(foreign), number(institution))
-                     for index, foreign, institution in frame[columns].itertuples(name=None))
+    async def get_orderable_cash(self, holding: Holding | None = None) -> Decimal:
+        domain, credentials, tr_id = (
+            (VIRTUAL, self.connector.settings.virtual, "VTTC8908R") if self.connector.settings.is_virtual
+            else (LIVE, self.connector.settings.live, "TTTC8908R"))
+        payload, _ = await self.connector._get(
+            domain, credentials, "/trading/inquire-psbl-order", tr_id,
+            {"CANO": credentials.account_no, "ACNT_PRDT_CD": credentials.product_code,
+             "PDNO": holding.stock_code if holding else "",
+             "ORD_UNPR": format(holding.current_price, "f") if holding else "0",
+             "ORD_DVSN": "00", "CMA_EVLU_AMT_ICLD_YN": "N", "OVRS_ICLD_YN": "N"})
+        return number(payload["output"]["ord_psbl_cash"])
 
 
 class BrokerConnector:
-    """Share one instance per backend process to share the request semaphore."""
+    """Account access plus KRX market data. Share one instance per process for the semaphore.
 
-    def __init__(self, settings, redis, http, *, market_data=None, stock_master=load_stock_master,
+    The account source is pluggable (KIS by default, Toss via toss_account); quotes, bars
+    and investor flows always use the KIS live domain with a PyKRX fallback.
+    """
+
+    def __init__(self, settings, redis, http, *, account=None, market_data=None, stock_master=fetch_stocks,
                  clock=None, sleep=asyncio.sleep):
         self.settings = settings
         self.redis = redis
@@ -285,6 +143,7 @@ class BrokerConnector:
         self.clock = clock if clock is not None else lambda: datetime.now(timezone.utc)
         self.sleep = sleep
         self.semaphore = asyncio.Semaphore(2)
+        self.account = (account or KisAccount)(self)
 
     @classmethod
     @asynccontextmanager
@@ -394,64 +253,10 @@ class BrokerConnector:
         ))
 
     async def get_balance(self) -> Balance:
-        virtual = self.settings.is_virtual
-        domain, credentials, transaction = (
-            (VIRTUAL, self.settings.virtual, "VTTC8434R") if virtual
-            else (LIVE, self.settings.live, "TTTC8434R")
-        )
-        if not all((credentials.account_no, credentials.app_key, credentials.app_secret)):
-            raise BrokerConfigurationError("kis_account_not_configured", "virtual" if virtual else "live")
-        params = {
-            "CANO": credentials.account_no, "ACNT_PRDT_CD": credentials.product_code,
-            "AFHR_FLPR_YN": "N", "OFL_YN": "", "INQR_DVSN": "02", "UNPR_DVSN": "01",
-            "FUND_STTL_ICLD_YN": "N", "FNCG_AMT_AUTO_RDPT_YN": "N", "PRCS_DVSN": "00",
-        }
-        rows, cursors = [], set()
-        summary = None
-        cursor = ("", "")
-        continuation = ""
-        while True:
-            params["CTX_AREA_FK100"], params["CTX_AREA_NK100"] = cursor
-            body, headers = await self._get(domain, credentials, "/trading/inquire-balance",
-                                            transaction, params, continuation)
-            rows.extend(body["output1"])
-            if summary is None and body.get("output2"):
-                summary = body["output2"][0]
-            if headers.get("tr_cont") not in {"F", "M"}:
-                break
-            cursor = tuple(body[field].strip() for field in ("ctx_area_fk100", "ctx_area_nk100"))
-            if not any(cursor) or cursor in cursors:
-                raise BrokerError("Invalid KIS balance continuation")
-            cursors.add(cursor)
-            continuation = "N"
-        if summary is None:
-            raise BrokerError("KIS balance summary is missing")
-        cash, total = (number(summary[field]) for field in ("dnca_tot_amt", "tot_evlu_amt"))
-        positions = [(row, number(row["hldg_qty"])) for row in rows]
-        positions = [(row, qty) for row, qty in positions if qty != ZERO]
-        master = await self.stock_master(list(dict.fromkeys(symbol(row["pdno"]) for row, _ in positions)))
-        holdings = []
-        for row, quantity in positions:
-            code = symbol(row["pdno"])
-            asset_type, corp_code, isin = master.get(code, (None, None, None))
-            avg, price, cost, value, pnl, pnl_pct = (number(row[field]) for field in (
-                "pchs_avg_pric", "prpr", "pchs_amt", "evlu_amt", "evlu_pfls_amt", "evlu_pfls_rt",
-            ))
-            holdings.append(Holding(code, row["prdt_name"], asset_type, corp_code, isin, quantity,
-                                    avg, price, cost, value, pnl, pnl_pct, value / total if total else ZERO))
-        return Balance(cash, total, cash / total if total else ZERO, tuple(holdings))
+        return await self.account.get_balance()
 
     async def get_orderable_cash(self, holding: Holding | None = None) -> Decimal:
-        domain, credentials, tr_id = (
-            (VIRTUAL, self.settings.virtual, "VTTC8908R") if self.settings.is_virtual
-            else (LIVE, self.settings.live, "TTTC8908R"))
-        payload, _ = await self._get(
-            domain, credentials, "/trading/inquire-psbl-order", tr_id,
-            {"CANO": credentials.account_no, "ACNT_PRDT_CD": credentials.product_code,
-             "PDNO": holding.stock_code if holding else "",
-             "ORD_UNPR": format(holding.current_price, "f") if holding else "0",
-             "ORD_DVSN": "00", "CMA_EVLU_AMT_ICLD_YN": "N", "OVRS_ICLD_YN": "N"})
-        return number(payload["output"]["ord_psbl_cash"])
+        return await self.account.get_orderable_cash(holding)
 
     async def _market(self, endpoint, transaction, code, params=None):
         code_params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code}
@@ -596,15 +401,7 @@ class BrokerConnector:
             prices = (bar.open, bar.high, bar.low, bar.close)
             if not all(price.is_finite() and price > ZERO for price in prices):
                 continue
-            bucket = candle_period_start(bar.session, period)
-            candle = candles.get(bucket)
-            if candle is None:
-                candles[bucket] = Candle(bucket, *prices, bar.volume)
-            else:
-                candle.high = max(candle.high, bar.high)
-                candle.low = min(candle.low, bar.low)
-                candle.close = bar.close
-                candle.volume += bar.volume
+            fold_bar(candles, candle_period_start(bar.session, period), *prices, bar.volume)
         return [candles[bucket] for bucket in sorted(candles)]
 
     async def get_ten_minute_candles(self, stock_code: str) -> list[Candle]:
@@ -753,10 +550,8 @@ class BrokerConnector:
         if as_of.utcoffset() is None:
             raise ValueError("as_of must be timezone-aware")
         kis_code, asset_type = self._market_symbol(stock_code, asset_type)
-        local = as_of.astimezone(KST)
-        cutoff = local.date() - timedelta(days=local.time() < time(15, 40))
         calendar = krx_calendar()
-        last = calendar.date_to_session(cutoff, direction="previous")
+        last = calendar.date_to_session(confirmed_day(as_of), direction="previous")
         sessions = [last.date()]
         for _ in range(4):
             last = calendar.previous_session(last)

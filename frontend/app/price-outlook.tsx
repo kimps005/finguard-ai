@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { ExternalLink, RefreshCw, Search } from "lucide-react";
 import TossTenMinuteChart from "./toss-ten-minute-chart";
 import {
-  readChatEvents, type DecimalString, type StockPriceBand,
+  SessionExpired, streamChat, type DecimalString, type StockPriceBand,
   type StockPriceBands, type StockSearchResult,
 } from "../lib/chat-stream";
 
@@ -166,18 +166,9 @@ export default function PriceOutlook({ pin, pinHeader, stock, onStockChange, onU
     }
 
     try {
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: { [pinHeader]: pin, "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "price_bands", target_stock_code: code }),
-        signal: controller.signal,
-      });
-      if (response.status === 401) {
-        onUnauthorized("접근이 만료되었습니다. PIN을 다시 입력해 주세요.");
-        return;
-      }
-      if (!response.ok || !response.body) throw new Error("가격 구간 분석을 시작할 수 없습니다.");
-      for await (const item of readChatEvents(response.body)) {
+      const events = streamChat({ mode: "price_bands", target_stock_code: code },
+                                { pin, pinHeader, signal: controller.signal }, "가격 구간 분석을 시작할 수 없습니다.");
+      for await (const item of events) {
         if (controller.signal.aborted) return;
         if (item.event === "price_bands" && "band" in item.data) show(item.data);
         if (item.event === "error") throw new Error(item.data.message);
@@ -189,7 +180,9 @@ export default function PriceOutlook({ pin, pinHeader, stock, onStockChange, onU
       }
       throw new Error("가격 구간 분석 연결이 끊겼습니다. 다시 분석을 눌러 주세요.");
     } catch (problem) {
-      if (!controller.signal.aborted && activeCode.current === code) {
+      if (problem instanceof SessionExpired) {
+        onUnauthorized(problem.message);
+      } else if (!controller.signal.aborted && activeCode.current === code) {
         setError(problem instanceof Error ? problem.message : "가격 구간 분석을 완료할 수 없습니다.");
       }
     } finally {

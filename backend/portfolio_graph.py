@@ -3,7 +3,7 @@
 import asyncio
 from dataclasses import asdict
 from datetime import date
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 import operator
 import re
 from typing import Annotated, Literal, TypedDict
@@ -18,6 +18,7 @@ from backend import llm, stock_analysis
 from backend.broker import Balance
 from backend.finance_calc import calculate_scorecard, simulate_purchase
 from backend.portfolio_market import MarketData, ScoreInputs
+from backend.report import account_view, diagnosis_report, quote_parts
 
 
 class Query(TypedDict):
@@ -25,16 +26,18 @@ class Query(TypedDict):
 
 
 class PortfolioState(Query, total=False):
+    # Public: streamed to the client in the final "done" event (main.PUBLIC_FIELDS).
     intent_type: Literal["fast_lookup", "deep_diagnosis", "simulation"]
     account_summary: dict
     holdings: list[dict]
     quant_scorecards: dict[str, dict]
     macro_context: dict | None
-    stock_analysis_results: Annotated[list[dict], operator.add]
-    verified_stock_results: list[dict]
+    verified_stock_results: list[dict]  # No reducer: the guardrail writes it once, so it never accumulates.
     guardrail_warnings: list[str]
     simulation_result: dict | None
     final_report: str
+    # Internal: typed inputs shared between nodes, never serialized to the client.
+    stock_analysis_results: Annotated[list[dict], operator.add]  # Fan-out buffer, one entry per worker.
     balance: Balance
     as_of: date
     score_inputs: dict[str, ScoreInputs]
@@ -70,15 +73,10 @@ async def router_node(state):
             "quant_scorecards": {}, "macro_context": None, "simulation_result": None}
 
 
-def account_view(balance):
-    return {"account_summary": {"total_value": balance.total_value,
-                                "cash_deposit": balance.cash_deposit,
-                                "cash_weight": balance.cash_weight},
-            "holdings": [asdict(h) for h in balance.holdings]}
-
-
 def route_to_stock_workers(state: PortfolioState) -> str | list[Send]:
-    stocks = [s for s in state["holdings"] if s["asset_type"] == "STOCK" and s["corp_code"]]
+    # A stock whose score inputs could not be collected has nothing to analyze.
+    stocks = [s for s in state["holdings"] if s["asset_type"] == "STOCK" and s["corp_code"]
+              and s["stock_code"] in state["score_inputs"]]
     if not stocks:
         return "synthesizer_node"
     top = sorted(stocks, key=lambda s: (-s["weight"], s["stock_code"]))[:3]
@@ -114,137 +112,28 @@ async def simulation(query, balance, market):
     return {"stock_code": holding.stock_code, "orderable_cash": cash, **asdict(result)}
 
 
-def quote_parts(state):
-    summary = state["account_summary"]
-    if summary["cash_deposit"] is None:
-        yield f"국내 주식 평가액 {summary['total_value']:,}원 · 예수금 조회 불가\n"
-    else:
-        yield (f"총 평가액 {summary['total_value']:,}원 · 예수금 {summary['cash_deposit']:,}원 "
-               f"({summary['cash_weight']:.2%})\n")
-    for h in state["holdings"]:
-        yield (f"\n- {h['name']} ({h['stock_code']}) · {h['quantity']:,}주 · "
-               f"현재가 {h['current_price']:,}원 · 평단가 {h['average_price']:,}원 · "
-               f"수익률 {h['profit_loss_pct']}% · 비중 {h['weight']:.2%}")
-
-
-def won(amount):
-    return "자료 없음" if amount is None else f"{amount.to_integral_value(rounding=ROUND_HALF_UP):,}원"
-
-
-def disclosure_link(alias, title, receipt):
-    return f"[{alias}](https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt}) · {' '.join(title.split())}"
-
-
-def diagnosis_report(state, summary="", disclosures=()):
-    query = state["user_query"]
-    simulation = state["simulation_result"] or {}
-    holdings = state["holdings"]
-    selected = [h for h in holdings if h["stock_code"] == simulation.get("stock_code")
-                or h["stock_code"] in query or (h["name"] and h["name"] in query)]
-    selected = selected or sorted(holdings, key=lambda h: -h["weight"])[:3]
-    answer, evidence = [], []
-    if "message" in simulation:
-        answer.append(simulation["message"])
-    elif simulation:
-        average, weight = simulation["average_price"], simulation["weight"]
-        simulated_name = next(h["name"] for h in holdings if h["stock_code"] == simulation["stock_code"])
-        answer.append(f"**{simulated_name}** 현재가에 {simulation['buy_quantity']:,}주 체결을 가정하면 예상 평단가는 "
-                      f"{won(average)}이고, 남는 주문 가능 현금은 {won(simulation['remaining_cash'])}입니다."
-                      + (f" 예상 비중은 {weight:.2%}입니다." if weight is not None else ""))
-        evidence.append(f"매수 시뮬레이션 · 투자 금액 {won(simulation['invested_amount'])}, "
-                        f"매수 수량 {simulation['buy_quantity']:,}주, 예상 평단가 {won(average)}")
-
-    rows = {row["stock_code"]: row for row in state["stock_analysis_results"]}
-    local_aliases = {}
-    for h in selected:
-        code, name = h["stock_code"], h["name"]
-        price, average = won(h["current_price"]), won(h["average_price"])
-        card = state["quant_scorecards"].get(code, {})
-        inputs = state["score_inputs"].get(code)
-        prices = f"{name} · 현재가 {price}, 평단가 {average}"
-        has_ma20 = inputs is not None and len(inputs.bars) >= 20
-        if has_ma20:
-            ma20 = sum((bar.close for bar in inputs.bars[-20:]), Decimal(0)) / 20
-            current = h["current_price"]
-            relation = "위" if current > ma20 else "아래" if current < ma20 else "수준"
-            scenario = (f"**{name}** 현재가 {price}는 20일선({won(ma20)}) {relation}입니다. "
-                        "20일선 위에서 순매수가 이어지면 반등 여지가 있고, "
-                        "20일선 아래에서 순매도가 이어지면 추가 하락 위험이 커집니다.")
-            prices += f", 20일선 {won(ma20)}"
-        else:
-            scenario = f"**{name}** 현재가 {price}이며 20일선 자료가 부족해 추세를 판단하기 어렵습니다."
-        scenario += f" 평단가는 {average}입니다."
-        if "손절" in query and has_ma20:
-            scenario += " 20일선 아래에서 순매도가 지속되는 구간은 하방 위험을 재평가할 기준입니다."
-        if re.search(r"목표|매도|익절", query):
-            scenario += " 평단가 회복 여부는 손익을 비교할 기준이며, 목표 매도가 범위를 산정할 자료는 부족합니다."
-        if re.search(r"물타|추매|추가\s*매수", query):
-            scenario += " 현재가가 평단가보다 낮을 때 추가 체결은 평단가를 낮추고 보유 수량을 늘립니다."
-        evidence.append(prices)
-        if inputs:
-            flow = inputs.flow
-            scenario += (f" 최근 5거래일 순매수는 외국인 {flow.foreign_net_buy:,}주, "
-                         f"기관 {flow.institution_net_buy:,}주입니다.")
-            evidence.append(f"{name} · 최근 5거래일 순매수 외국인 {flow.foreign_net_buy:,}주, "
-                            f"기관 {flow.institution_net_buy:,}주")
-        dilution, total = card.get("dilution_pct"), card.get("total")
-        if dilution is not None:
-            scenario += f" 오버행 희석률은 {dilution:f}%입니다."
-            evidence.append(f"{name} · 오버행 희석률 {dilution:f}%")
-            if dilution > 0:
-                scenario += " 해당 물량이 실제로 출회되면 매물 부담이 커질 수 있습니다."
-            if dilution > 0 and not summary and inputs:
-                on = state["as_of"]
-                receipts = {event["rcept_no"] for event in inputs.events or []
-                            if event["convertible_shares"] > 0
-                            and event["corp_code"] == inputs.stock.corp_code
-                            and event["board_resolution_date"] <= on
-                            and (event.get("exercise_end_date") or date.max) >= on}
-                row = rows.get(code, {})
-                titles = {doc["source"]: doc["title"] for doc in row.get("disclosures", [])}
-                for alias, receipt in row.get("doc_map", {}).items():
-                    if receipt in receipts:
-                        report_alias = local_aliases.setdefault(receipt, f"DOC-{len(local_aliases) + 1}")
-                        scenario += f" 오버행 산정에는 [{report_alias}]의 전환가능 물량이 반영됐습니다."
-                        evidence.append(f"{name} · " + disclosure_link(
-                            report_alias, titles.get(alias, "오버행 공시"), receipt))
-        if total is not None:
-            scenario += f" 수급·모멘텀·실적·오버행을 합산한 점수는 {total}/100입니다."
-            scores = card["scores"]
-            evidence.append(f"{name} · 수급 {scores['flow']}, 모멘텀 {scores['momentum']}, "
-                            f"실적 {scores['earnings']}, 오버행 {scores['overhang']}점 (합계 {total}/100)")
-        if simulation.get("stock_code") == code:
-            answer[0] += " " + scenario
-        else:
-            answer.append(scenario)
-
-    if summary:
-        answer.append(summary)
-    evidence.extend(disclosure_link(alias, title, receipt) for alias, title, receipt in disclosures)
-    core = "\n\n".join(answer) or "보유 종목이 없어 종목별 위험과 가격 시나리오를 산정할 수 없습니다."
-    grounds = "\n".join(f"- {item}" for item in evidence) or "- 보유 종목 없음"
-    return f"{stock_analysis.ANSWER_HEADING}\n\n{core}\n\n{stock_analysis.EVIDENCE_HEADING}\n\n{grounds}"
-
-
 def build_graph(market: MarketData):
     async def fast_quote_node(state):
         return account_view(await market.broker.get_balance())
 
     async def market_data_node(state):
-        balance, on, macro, inputs = await market.collect()
+        balance, on, macro, inputs, warnings = await market.collect()
         view = account_view(balance)
+        # Public rows carry the mapping the score inputs were collected with. A holding without
+        # inputs keeps the broker's mapping; fan-out skips it because it has no score_inputs.
         for row in view["holdings"]:
-            entry = inputs.get(row["stock_code"])
-            row.update(asset_type=entry.stock.asset_type if entry else None,
-                       corp_code=entry.stock.corp_code if entry else None)
-        return {**view, "balance": balance, "as_of": on, "macro_context": macro, "score_inputs": inputs}
+            if entry := inputs.get(row["stock_code"]):
+                row.update(asset_type=entry.stock.asset_type, corp_code=entry.stock.corp_code)
+        return {**view, "balance": balance, "as_of": on, "macro_context": macro, "score_inputs": inputs,
+                "guardrail_warnings": state["guardrail_warnings"] + warnings}
 
     async def quant_scorecard_node(state):
         cards = {}
         for holding in state["balance"].holdings:
             inputs = state["score_inputs"].get(holding.stock_code)
             if inputs is None:
-                cards[holding.stock_code] = {"status": "unmapped"}
+                # Mapped in stock_master but a required input (five-day flow) failed.
+                cards[holding.stock_code] = {"status": "unavailable" if holding.asset_type else "unmapped"}
                 continue
             cards[holding.stock_code] = calculate_scorecard(
                 inputs.stock, holding, inputs.flow, as_of=state["as_of"], reports=inputs.reports,

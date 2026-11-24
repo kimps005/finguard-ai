@@ -162,10 +162,10 @@ def test_sync_writes_mixed_snapshot_only_after_all_feeds_arrive(snapshot, monkey
     connection = connect.return_value.__enter__.return_value
     cursor = connection.cursor.return_value.__enter__.return_value
     cursor.executemany.assert_called_once_with(batch.UPSERT, [
-        ("005930", "00126380", COMMON_ISIN, ISSUER, "삼성전자", "STOCK", None, 5969782550),
-        ("005935", "00126380", PREFERRED_ISIN, ISSUER, "삼성전자우", "STOCK", None, 822886700),
-        ("069500", None, ETF_ISIN, ISSUER, "KODEX 200", "ETF", None, 3000000),
-        ("580001", None, ETN_ISIN, None, "예시 ETN", "ETN", None, 900000),
+        ("005930", "00126380", COMMON_ISIN, ISSUER, "삼성전자", "STOCK", None, 5969782550, None),
+        ("005935", "00126380", PREFERRED_ISIN, ISSUER, "삼성전자우", "STOCK", None, 822886700, None),
+        ("069500", None, ETF_ISIN, ISSUER, "KODEX 200", "ETF", None, 3000000, None),
+        ("580001", None, ETN_ISIN, None, "예시 ETN", "ETN", None, 900000, None),
     ])
 
 
@@ -189,13 +189,13 @@ def test_stock_master_schema_and_upsert_columns():
                for stmt in statements)
 
     bound_sql = batch.UPSERT
-    for index in range(1, 9):
+    for index in range(1, 10):
         bound_sql = bound_sql.replace("%s", f"${index}", 1)
     upsert = parse_sql(bound_sql)[0].stmt
     assert upsert.relation.relname == "stock_master"
     assert [column.name for column in upsert.cols] == [
         "stock_code", "corp_code", "isin_cd", "crno",
-        "corp_name", "asset_type", "induty_code", "listed_shares",
+        "corp_name", "asset_type", "induty_code", "listed_shares", "market",
     ]
     assert upsert.onConflictClause.infer.indexElems[0].name == "stock_code"
 

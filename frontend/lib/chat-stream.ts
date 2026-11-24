@@ -27,6 +27,9 @@ export interface Status {
   node: string;
   phase: "started" | "completed" | "failed";
   task_id?: string;
+  /** Sent only when a stock_worker task starts; later phases inherit it client-side. */
+  stock_code?: string;
+  stock_name?: string;
 }
 
 export type Scorecards = Record<string, {
@@ -100,6 +103,24 @@ type ChatEvent =
   | { event: "price_bands"; data: BandSnapshot }
   | { event: "error"; data: { message: string } }
   | { event: "done"; data: Diagnosis | (BandSnapshot & { ok: true; mode: "price_bands" }) | { ok: false } };
+
+/** The access PIN was rejected or has expired; the caller should lock the dashboard. */
+export class SessionExpired extends Error {}
+
+/** POST to the PIN-protected chat proxy and yield its SSE events. */
+export async function* streamChat(payload: object, { pin, pinHeader, signal }: {
+  pin: string; pinHeader: string; signal: AbortSignal;
+}, startError: string): AsyncGenerator<ChatEvent> {
+  const response = await fetch("/api/chat", {
+    method: "POST",
+    headers: { [pinHeader]: pin, "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal,
+  });
+  if (response.status === 401) throw new SessionExpired("접근이 만료되었습니다. PIN을 다시 입력해 주세요.");
+  if (!response.ok || !response.body) throw new Error(startError);
+  yield* readChatEvents(response.body);
+}
 
 export async function* readChatEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<ChatEvent> {
   const reader = body.getReader();
