@@ -18,7 +18,7 @@ from backend.market_time import candle_poll_delay
 from backend.portfolio_graph import account_view, build_graph
 from backend.portfolio_market import MarketData, search_stocks
 from backend.price_bands import StockPriceUnavailable, price_band_updates, stock_price_band_updates
-from backend.stock_analysis import dump
+from backend.serialization import dump
 from backend.toss_broker import TossBrokerConnector, TossSettings
 
 

@@ -1,16 +1,13 @@
 """Stock-local evidence, structured LLM output and sentence-level citation verification."""
 
 import asyncio
-from dataclasses import asdict, is_dataclass
-from datetime import date
-from decimal import Decimal
-import json
 import re
 from typing import Annotated
 
 from pydantic import BaseModel, StringConstraints, ValidationError
 
 from backend import dart_rag, llm
+from backend.serialization import dump
 
 
 ALIAS = re.compile(r"DOC-[0-9]+")
@@ -20,20 +17,6 @@ ANSWER_HEADING = "### 핵심 답변"
 EVIDENCE_HEADING = "### 판단 근거"
 Alias = Annotated[str, StringConstraints(pattern=r"^DOC-[1-9][0-9]*$")]
 Receipt = Annotated[str, StringConstraints(pattern=r"^[0-9]{14}$")]
-
-
-def encode(value):
-    if isinstance(value, Decimal):
-        return format(value, "f")
-    if isinstance(value, date):
-        return value.isoformat()
-    if is_dataclass(value):
-        return asdict(value)
-    raise TypeError(f"Unexpected JSON value {type(value).__name__}")
-
-
-def dump(value):
-    return json.dumps(value, ensure_ascii=False, default=encode, allow_nan=False)
 
 
 class Analysis(BaseModel):

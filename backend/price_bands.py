@@ -11,7 +11,8 @@ from pydantic import BaseModel, Field
 from backend import dart_rag, llm
 from backend.market_time import KST, confirmed_day
 from backend.portfolio_market import stock_master
-from backend.stock_analysis import ALIAS, RECEIPT, Analysis, dump
+from backend.serialization import dump
+from backend.stock_analysis import ALIAS, RECEIPT, Analysis
 
 
 logger = logging.getLogger(__name__)

@@ -29,6 +29,7 @@ from backend.finance_calc import ANNUAL, THIRD, LockupRelease, calculate_scoreca
 from backend.main import chat_events
 from backend.portfolio_graph import build_graph
 from backend.portfolio_market import ScoreInputs
+from backend.serialization import dump
 from backend.sync_stock_master import Stock
 
 
@@ -276,7 +277,7 @@ async def evaluate(dataset, *, dry_run, judge_model):
             sample = SingleTurnSample(user_input=case["question"], response=answer, reference=case["reference"],
                                       retrieved_contexts=disclosures)
             f = await faithful.single_turn_ascore(sample.model_copy(update={
-                "retrieved_contexts": [*disclosures, stock_analysis.dump(indicators)]})) if answer else 0.0
+                "retrieved_contexts": [*disclosures, dump(indicators)]})) if answer else 0.0
             p = await precision.single_turn_ascore(sample) if disclosures else 0.0
             results.append(case_result(case, f, p, checks))
     return {**summarize(dataset, results, "live"), "judge_model": judge_model,
