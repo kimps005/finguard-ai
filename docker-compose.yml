@@ -7,7 +7,9 @@ services:
       BACKEND_INTERNAL_URL: ${COMPOSE_BACKEND_INTERNAL_URL:-http://backend:8000}
       APP_ACCESS_PIN: ${APP_ACCESS_PIN:-}
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
 
   backend:
     build: .
@@ -16,6 +18,13 @@ services:
       - ./data/huggingface:/root/.cache/huggingface
     expose:
       - "8000"
+    healthcheck:
+      test: ["CMD", ".venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 120s
+    restart: unless-stopped
     environment:
       PGHOST: ${COMPOSE_PGHOST:-db}
       PGPORT: ${COMPOSE_PGPORT:-5432}
