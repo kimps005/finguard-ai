@@ -1,11 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState, type FormEvent } from "react";
 import {
   ArrowRight, Check, CircleAlert, Globe2, LoaderCircle, LockKeyhole, ShieldCheck, Wallet, X,
 } from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { analysisReducer, idleRun } from "../lib/analysis-run";
 import {
   readChatEvents, type AccountSnapshot, type DecimalString, type Scorecards, type Status, type StockSearchResult,
 } from "../lib/chat-stream";
@@ -150,13 +151,8 @@ export default function Dashboard() {
   const [simulationCode, setSimulationCode] = useState("");
   const [stock, setStock] = useState<StockSearchResult>(WATCHLIST[0]);
   const [query, setQuery] = useState("");
-  const [topic, setTopic] = useState("");
-  const [running, setRunning] = useState(false);
-  const [elapsed, setElapsed] = useState<number | null>(null);
-  const [statuses, setStatuses] = useState<Record<string, Status>>({});
-  const [report, setReport] = useState("");
-  const [warnings, setWarnings] = useState<string[]>([]);
-  const [analysisError, setAnalysisError] = useState("");
+  const [analysis, dispatch] = useReducer(analysisReducer, idleRun);
+  const { topic, running, elapsed, statuses, report, warnings, error: analysisError } = analysis;
   const requestRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -182,15 +178,9 @@ export default function Dashboard() {
     setSimulationCode("");
     setStock(WATCHLIST[0]);
     setQuery("");
-    setTopic("");
-    setReport("");
-    setStatuses({});
-    setWarnings([]);
-    setAnalysisError("");
+    dispatch({ type: "reset" });
     setAccessError(message);
     setChecking(false);
-    setRunning(false);
-    setElapsed(null);
   }, []);
 
   useEffect(() => {
@@ -260,13 +250,7 @@ export default function Dashboard() {
     const controller = new AbortController();
     const startedAt = performance.now();
     requestRef.current = controller;
-    setTopic(label);
-    setRunning(true);
-    setElapsed(null);
-    setReport("");
-    setStatuses({});
-    setWarnings([]);
-    setAnalysisError("");
+    dispatch({ type: "start", topic: label });
 
     try {
       const response = await fetch("/api/chat", {
@@ -283,24 +267,17 @@ export default function Dashboard() {
 
       for await (const item of readChatEvents(response.body)) {
         if (item.event === "status") {
-          const status = item.data;
-          const key = status.node === "router_node" ? status.node : status.task_id ?? status.node;
-          setStatuses((current) => {
-            // Keep event order and retain target metadata when a later phase omits it.
-            const next = { ...current };
-            delete next[key];
-            return { ...next, [key]: { ...current[key], ...status } };
-          });
+          dispatch({ type: "status", status: item.data });
         } else if (item.event === "token") {
-          setReport((current) => current + item.data.text);
+          dispatch({ type: "token", text: item.data.text });
         } else if (item.event === "error") {
           throw new Error(item.data.message);
         } else if (item.event === "done") {
           const result = item.data;
           if (!result.ok || !("final_report" in result)) throw new Error("계좌 분석을 완료할 수 없습니다.");
-          setReport(result.final_report);
+          dispatch({ type: "done", report: result.final_report, warnings: result.guardrail_warnings,
+                     elapsed: performance.now() - startedAt });
           setAccountError("");
-          setWarnings(result.guardrail_warnings);
           setAccount((current) => ({
             holdings: result.holdings,
             account_summary: {
@@ -309,19 +286,18 @@ export default function Dashboard() {
             },
           }));
           if (result.intent_type !== "fast_lookup") setScores(result.quant_scorecards);
-          setElapsed(performance.now() - startedAt);
           return;
         }
       }
       throw new Error("분석 스트림이 완료되기 전에 연결이 끊겼습니다.");
     } catch (error) {
       if (!controller.signal.aborted) {
-        setAnalysisError(error instanceof Error ? error.message : "계좌 분석을 완료할 수 없습니다.");
+        dispatch({ type: "fail", message: error instanceof Error ? error.message : "계좌 분석을 완료할 수 없습니다." });
       }
     } finally {
       if (requestRef.current === controller) {
         requestRef.current = null;
-        setRunning(false);
+        dispatch({ type: "finish" });
       }
     }
   }
