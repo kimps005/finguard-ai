@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 import json
+import logging
 
 from psycopg.rows import dict_row
 
@@ -16,6 +17,11 @@ from backend.finance_calc import ANNUAL, THIRD, DartReports, LockupRelease
 from backend.market_time import KST, confirmed_day
 from backend.stock_master import fetch_stocks
 from backend.sync_stock_master import Stock
+
+
+logger = logging.getLogger(__name__)
+# Cold-cache ingestion must leave room for the workers within the PRD's 25-second budget.
+INGEST_TIMEOUT = 15
 
 
 @dataclass
@@ -68,26 +74,51 @@ class MarketData:
         self.external = external
 
     async def collect(self):
+        """Gather one snapshot; a failing source degrades its holding instead of the diagnosis.
+
+        Only the balance and stock_master lookups are fatal. Every other source records a
+        Korean warning and leaves its score input unknown, so the scorecard leaves that part
+        (and the total) unset rather than guessing.
+        """
         now = self.broker.clock().astimezone(KST)
         on = now.date()
+        warnings: list[str] = []
+
+        async def optional(operation, warning, default=None):
+            try:
+                return await operation
+            except Exception as exc:  # CancelledError is not an Exception and still propagates.
+                logger.warning("Score input unavailable (%s)", type(exc).__name__)
+                warnings.append(warning)
+                return default
 
         async def issuer_data(stock):
-            # Module 4 owns the issuer lock, index and correction-safe event upserts.
-            await self.etl.ingest_stock(stock.stock_code, on - timedelta(days=90), on)
-            return await outstanding_events(stock.corp_code, on)
+            # Module 4 owns the issuer lock, index and correction-safe event upserts. A timed-out
+            # ingest keeps the receipts it finished; the next request resumes from there.
+            async def ingest():
+                async with asyncio.timeout(INGEST_TIMEOUT):
+                    await self.etl.ingest_stock(stock.stock_code, on - timedelta(days=90), on)
+
+            await optional(ingest(), f"{stock.corp_name} 최신 공시 적재가 끝나지 않아 저장된 공시로 분석했습니다.")
+            return await optional(outstanding_events(stock.corp_code, on),
+                                  f"{stock.corp_name} 오버행 이벤트를 불러오지 못해 오버행 점수를 산정하지 않았습니다.")
 
         async def score_inputs(stock, issuer):
-            code = stock.stock_code
+            code, name = stock.stock_code, stock.corp_name
             async with asyncio.TaskGroup() as group:
-                flow = group.create_task(self.broker.get_five_day_flow(
-                    code, as_of=now, asset_type=stock.asset_type))
+                flow = group.create_task(optional(
+                    self.broker.get_five_day_flow(code, as_of=now, asset_type=stock.asset_type),
+                    f"{name} 최근 5거래일 확정 수급을 불러오지 못해 정량 점수에서 제외했습니다."))
                 if stock.asset_type == "STOCK":
                     # Both MA windows must end on a completed trading session.
                     end = confirmed_day(now)
-                    bars = group.create_task(self.broker.get_daily_bars(
-                        code, end - timedelta(days=60), end, asset_type=stock.asset_type))
+                    bars = group.create_task(optional(
+                        self.broker.get_daily_bars(code, end - timedelta(days=60), end, asset_type=stock.asset_type),
+                        f"{name} 일봉을 불러오지 못해 모멘텀 점수를 산정하지 않았습니다.", ()))
                     events = await issuer if issuer else None
                     lockup = group.create_task(self.external.get_lockup(asdict(stock), as_of=on))
+            if flow.result() is None:
+                return None
             inputs = ScoreInputs(stock, flow.result())
             if stock.asset_type == "STOCK":
                 inputs.bars = bars.result()
@@ -97,7 +128,8 @@ class MarketData:
             return inputs
 
         async with asyncio.TaskGroup() as group:
-            macro = group.create_task(self.external.get_macro_context(as_of=on))
+            macro = group.create_task(optional(self.external.get_macro_context(as_of=on),
+                                               "환율·금리 자료를 불러오지 못했습니다."))
             balance = await self.broker.get_balance()
             master = await fetch_stocks([item.stock_code for item in balance.holdings])
             issuers, reports, jobs = {}, {}, {}
@@ -105,13 +137,15 @@ class MarketData:
                 corp = stock.corp_code
                 if stock.asset_type == "STOCK" and corp and corp not in issuers:
                     issuers[corp] = group.create_task(issuer_data(stock))
-                    reports[corp] = group.create_task(financial_reports(self.etl, corp, on))
+                    reports[corp] = group.create_task(optional(
+                        financial_reports(self.etl, corp, on),
+                        f"{stock.corp_name} 재무제표를 불러오지 못해 실적 점수를 산정하지 않았습니다."))
                 jobs[code] = group.create_task(score_inputs(stock, issuers.get(corp)))
-        inputs = {code: job.result() for code, job in jobs.items()}
+        inputs = {code: job.result() for code, job in jobs.items() if job.result() is not None}
         for item in inputs.values():
             if item.stock.corp_code in reports:
                 item.reports = reports[item.stock.corp_code].result()
-        return balance, on, macro.result(), inputs
+        return balance, on, macro.result(), inputs, list(dict.fromkeys(warnings))
 
     async def orderable_cash(self, holding: Holding | None = None) -> Decimal:
         return await self.broker.get_orderable_cash(holding)

@@ -107,7 +107,7 @@ def scenario(case):
     inputs = ScoreInputs(stock, flow, bars, reports, releases, events)
 
     async def collect():
-        return balance, AS_OF, None, {code: inputs}
+        return balance, AS_OF, None, {code: inputs}, []
 
     async def orderable_cash(_holding):
         return cash

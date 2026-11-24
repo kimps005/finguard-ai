@@ -74,7 +74,9 @@ async def router_node(state):
 
 
 def route_to_stock_workers(state: PortfolioState) -> str | list[Send]:
-    stocks = [s for s in state["holdings"] if s["asset_type"] == "STOCK" and s["corp_code"]]
+    # A stock whose score inputs could not be collected has nothing to analyze.
+    stocks = [s for s in state["holdings"] if s["asset_type"] == "STOCK" and s["corp_code"]
+              and s["stock_code"] in state["score_inputs"]]
     if not stocks:
         return "synthesizer_node"
     top = sorted(stocks, key=lambda s: (-s["weight"], s["stock_code"]))[:3]
@@ -115,22 +117,23 @@ def build_graph(market: MarketData):
         return account_view(await market.broker.get_balance())
 
     async def market_data_node(state):
-        balance, on, macro, inputs = await market.collect()
+        balance, on, macro, inputs, warnings = await market.collect()
         view = account_view(balance)
-        # Fan-out picks STOCK rows with a corp_code and reads score_inputs for them, so the
-        # public rows must carry exactly the mapping the score inputs were collected with.
+        # Public rows carry the mapping the score inputs were collected with. A holding without
+        # inputs keeps the broker's mapping; fan-out skips it because it has no score_inputs.
         for row in view["holdings"]:
-            entry = inputs.get(row["stock_code"])
-            row.update(asset_type=entry.stock.asset_type if entry else None,
-                       corp_code=entry.stock.corp_code if entry else None)
-        return {**view, "balance": balance, "as_of": on, "macro_context": macro, "score_inputs": inputs}
+            if entry := inputs.get(row["stock_code"]):
+                row.update(asset_type=entry.stock.asset_type, corp_code=entry.stock.corp_code)
+        return {**view, "balance": balance, "as_of": on, "macro_context": macro, "score_inputs": inputs,
+                "guardrail_warnings": state["guardrail_warnings"] + warnings}
 
     async def quant_scorecard_node(state):
         cards = {}
         for holding in state["balance"].holdings:
             inputs = state["score_inputs"].get(holding.stock_code)
             if inputs is None:
-                cards[holding.stock_code] = {"status": "unmapped"}
+                # Mapped in stock_master but a required input (five-day flow) failed.
+                cards[holding.stock_code] = {"status": "unavailable" if holding.asset_type else "unmapped"}
                 continue
             cards[holding.stock_code] = calculate_scorecard(
                 inputs.stock, holding, inputs.flow, as_of=state["as_of"], reports=inputs.reports,
