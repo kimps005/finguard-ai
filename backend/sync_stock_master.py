@@ -249,10 +249,19 @@ def sync(base_date: date | None, dart_key: str, fsc_key: str) -> tuple[date, int
     raise SnapshotError("No complete KRX snapshot for the requested date range")
 
 
+def is_populated() -> bool:
+    with psycopg.connect() as connection:
+        return connection.execute("SELECT EXISTS (SELECT 1 FROM stock_master)").fetchone()[0]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-date", type=date.fromisoformat, help="KRX date (YYYY-MM-DD)")
+    parser.add_argument("--check-populated", action="store_true",
+                        help="exit 0 if stock_master has rows, 1 if empty; no download")
     args = parser.parse_args()
+    if args.check_populated:
+        return 0 if is_populated() else 1
     dart_key = os.environ.get("DART_API_KEY", "").strip()
     fsc_key = os.environ.get("FSC_SERVICE_KEY", "").strip()
     if not dart_key or not fsc_key:
