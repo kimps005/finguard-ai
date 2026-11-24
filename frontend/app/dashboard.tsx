@@ -9,7 +9,7 @@ import remarkGfm from "remark-gfm";
 import { analysisReducer, idleRun } from "../lib/analysis-run";
 import { describeTask, displayField, stageNames } from "../lib/progress-labels";
 import {
-  readChatEvents, type AccountSnapshot, type DecimalString, type Scorecards, type Status, type StockSearchResult,
+  SessionExpired, streamChat, type AccountSnapshot, type DecimalString, type Scorecards, type Status, type StockSearchResult,
 } from "../lib/chat-stream";
 import PriceOutlook, { WATCHLIST } from "./price-outlook";
 
@@ -226,19 +226,9 @@ export default function Dashboard() {
     dispatch({ type: "start", topic: label });
 
     try {
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: { [PIN_HEADER]: pin, "Content-Type": "application/json" },
-        body: JSON.stringify({ user_query: question }),
-        signal: controller.signal,
-      });
-      if (response.status === 401) {
-        lock("접근이 만료되었습니다. PIN을 다시 입력해 주세요.");
-        return;
-      }
-      if (!response.ok || !response.body) throw new Error("진단을 시작할 수 없습니다. 다시 시도해 주세요.");
-
-      for await (const item of readChatEvents(response.body)) {
+      const events = streamChat({ user_query: question }, { pin, pinHeader: PIN_HEADER, signal: controller.signal },
+                                "진단을 시작할 수 없습니다. 다시 시도해 주세요.");
+      for await (const item of events) {
         if (item.event === "status") {
           dispatch({ type: "status", status: item.data });
         } else if (item.event === "token") {
@@ -264,7 +254,9 @@ export default function Dashboard() {
       }
       throw new Error("분석 스트림이 완료되기 전에 연결이 끊겼습니다.");
     } catch (error) {
-      if (!controller.signal.aborted) {
+      if (error instanceof SessionExpired) {
+        lock(error.message);
+      } else if (!controller.signal.aborted) {
         dispatch({ type: "fail", message: error instanceof Error ? error.message : "계좌 분석을 완료할 수 없습니다." });
       }
     } finally {
