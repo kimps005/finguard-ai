@@ -26,6 +26,9 @@ from backend.lockup_disclosures import disclosed_releases
 FSC_URL = "https://apis.data.go.kr/1160100/GetStocIssuInfoService_V3/getLockUpRetuInfo_V3"
 NAVER_URL = "https://openapi.naver.com/v1/search/news.json"
 NAVER_HUB_URL = "https://naverapihub.apigw.ntruss.com/search/v1/news"
+# Naver's page maximum. Most of the newest rows only mention the issuer in the body, so the title filter
+# below needs a full page to keep `limit` articles (10 rows left 0-1 for 000660/005930).
+NAVER_DISPLAY = 100
 ECOS_URL = "https://ecos.bok.or.kr/api/StatisticSearch"
 ECOS_TTL = 86_400
 ECOS_SERIES = {
@@ -220,7 +223,7 @@ class ExternalConnectors:
             headers = {"X-Naver-Client-Id": self.naver_id, "X-Naver-Client-Secret": self.naver_secret}
         try:
             payload = await self._get_json(
-                "Naver", url, params={"query": corp_name, "sort": "date", "display": limit},
+                "Naver", url, params={"query": corp_name, "sort": "date", "display": NAVER_DISPLAY},
                 headers=headers,
             )
             items = payload["items"]

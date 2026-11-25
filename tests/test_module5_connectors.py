@@ -179,6 +179,32 @@ def test_naver_news_sanitizes_normalizes_and_deduplicates(monkeypatch, hub, url,
     asyncio.run(run())
 
 
+def test_naver_news_fetches_a_full_page_before_the_title_filter(monkeypatch):
+    # Most of the newest results only mention the issuer in the body. Fetching just `limit` rows
+    # left 0-1 titled articles for 000660/005930, so the page is filled first and then capped.
+    monkeypatch.setenv("NAVER_CLIENT_ID", "id")
+    monkeypatch.setenv("NAVER_CLIENT_SECRET", "secret")
+    displays = []
+
+    def respond(request):
+        display = int(request.url.params["display"])
+        displays.append(display)
+        rows = [{"title": f"삼성전자 기사 {i}" if i % 10 == 9 else f"업계 기사 {i}",
+                 "link": f"https://news.test/{i}", "description": "삼성전자 언급",
+                 "pubDate": f"Fri, 20 Nov 2026 {i % 24:02d}:00:00 +0000"} for i in range(100)]
+        return httpx.Response(200, json={"items": rows[:display]})
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+            api = connectors.ExternalConnectors.from_env(http, MemoryRedis())
+            news = await api.get_news(STOCK["corp_name"], limit=3)
+            assert len(news) == 3
+            assert displays == [100]  # Naver's maximum page; one request regardless of limit.
+            assert all("삼성전자" in item["title"] for item in news)
+
+    asyncio.run(run())
+
+
 def ecos_response():
     return httpx.Response(200, json={"StatisticSearch": {"row": [
         {"TIME": "20261120", "DATA_VALUE": "3.125"},
