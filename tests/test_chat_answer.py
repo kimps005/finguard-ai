@@ -65,17 +65,17 @@ def test_selected_non_held_stock_gets_a_card_and_answer(monkeypatch):
     frames = [parse_frame(frame) for frame in response.text.split("\n\n") if frame.strip()]
     event, done = frames[-1]
     assert event == "done" and done["ok"]
-    # No holding is named, so only the selected (not held) stock is a target, without score inputs.
-    assert [call.args[1] for call in price_card.get_or_build_card.await_args_list] == ["005930"]
+    # No holding is named: the selected (not held, no score inputs) stock first, then the top holding.
+    assert [call.args[1] for call in price_card.get_or_build_card.await_args_list] == ["005930", "000001"]
     workers = [data for kind, data in frames
                if kind == "status" and data["node"] == "stock_worker" and data["phase"] == "started"]
-    assert [data["stock_code"] for data in workers] == ["005930"]
+    assert sorted(data["stock_code"] for data in workers) == ["000001", "005930"]
     role, _, context = calls[0]
-    assert role == "answer" and [card["stock_code"] for card in context["cards"]] == ["005930"]
+    assert role == "answer" and [card["stock_code"] for card in context["cards"]] == ["005930", "000001"]
     report = done["final_report"]
     assert report.startswith(f"{ANSWER}\n\n선택 종목은 [P-2] 20일선 95원을 지키면")
     assert "[P-2] 종목005930 20일선 95원" in report.split(EVIDENCE)[1]
-    assert [row["stock_code"] for row in done["verified_stock_results"]] == ["005930"]
+    assert [row["stock_code"] for row in done["verified_stock_results"]] == ["005930", "000001"]
 
 
 def test_targets_union_selected_and_mentioned_capped_at_three():
@@ -93,6 +93,10 @@ def test_targets_union_selected_and_mentioned_capped_at_three():
     # Nothing selected or named: the three heaviest STOCK holdings.
     assert target_codes({**state, "user_query": "어때?", "selected_stock_code": None}) == [
         "000002", "000004", "000003"]
+    # A portfolio question names no holding: the selected card, then the heaviest STOCK holdings.
+    portfolio = {**state, "user_query": "포트폴리오 위험 진단"}
+    assert target_codes(portfolio) == ["999999", "000002", "000004"]
+    assert target_codes({**portfolio, "selected_stock_code": "000004"}) == ["000004", "000002", "000003"]
     sends = route_to_stock_workers(state)
     assert [(send.node, send.arg) for send in sends] == [
         ("stock_worker", {"stock_code": "999999", "name": None}),

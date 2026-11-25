@@ -5,6 +5,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 import json
 import logging
+from weakref import WeakValueDictionary
 
 from backend import dart_rag, llm
 from backend.card_validation import CardAnalysis, Materials, validate_card
@@ -19,6 +20,8 @@ from backend.stock_master import fetch_stocks
 
 
 logger = logging.getLogger(__name__)
+# One lock per cache key (stock and session) while a request holds it; unused locks are collected.
+card_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 HORIZON_SESSIONS = 10
 BAR_DAYS = 120
 ANALYST_TIMEOUT = 30
@@ -259,6 +262,16 @@ async def card_updates(market, stock_code: str):
     broker = market.broker
     now = broker.clock().astimezone(KST)
     key = CACHE_KEY.format(code=stock_code, session=confirmed_day(now).isoformat())
+    # Chat and the price-card screen may ask for one card at once. Uvicorn runs one worker, so an
+    # in-process lock lets the second caller wait for the first build and read it from the cache.
+    lock = card_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        async for update in _cached_or_built(market, stock, now, key):
+            yield update
+
+
+async def _cached_or_built(market, stock, now, key):
+    broker, stock_code = market.broker, stock.stock_code
     cached = await optional_data(broker.redis.get(key), 2)
     if cached:
         try:

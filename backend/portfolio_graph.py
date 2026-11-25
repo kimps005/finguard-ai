@@ -64,10 +64,11 @@ async def router_node(state):
 
 
 def target_codes(state) -> list[str]:
-    """The selected stock, then holdings the question names in order, at most three.
+    """The selected stock, then the holdings the question names in order, at most three.
 
-    With neither, the three heaviest STOCK holdings. Score inputs are not required: a selected stock
-    the account does not hold has none, and price_card decides held or not on its own.
+    A question that names no holding is about the portfolio: the selected stock is followed by the
+    heaviest STOCK holdings. Score inputs are not required: a selected stock the account does not
+    hold has none, and price_card decides held or not on its own.
     """
     query, holdings = state["user_query"], state["holdings"]
     codes = [selected] if (selected := state.get("selected_stock_code")) else []
@@ -76,11 +77,12 @@ def target_codes(state) -> list[str]:
         found = [query.find(label) for label in (holding["stock_code"], holding["name"]) if label and label in query]
         if found:
             mentions.append((min(found), holding["stock_code"]))
-    codes = list(dict.fromkeys(codes + [code for _, code in sorted(mentions)]))[:MAX_TARGETS]
-    if not codes:
+    if mentions:
+        codes += [code for _, code in sorted(mentions)]
+    else:
         stocks = [h for h in holdings if h["asset_type"] == "STOCK"]
-        codes = [h["stock_code"] for h in sorted(stocks, key=lambda h: (-h["weight"], h["stock_code"]))[:MAX_TARGETS]]
-    return codes
+        codes += [h["stock_code"] for h in sorted(stocks, key=lambda h: (-h["weight"], h["stock_code"]))]
+    return list(dict.fromkeys(codes))[:MAX_TARGETS]
 
 
 def route_to_stock_workers(state: PortfolioState) -> str | list[Send]:

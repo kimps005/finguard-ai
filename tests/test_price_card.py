@@ -250,6 +250,32 @@ def test_cache_hit_over_sse_still_ends_with_done(monkeypatch):
     assert invoke.await_count == 1
 
 
+def test_concurrent_builds_of_one_card_call_the_analyst_once(monkeypatch):
+    # Chat and the price-card screen can ask for the same card at the same moment.
+    slow = analyst()
+    build = slow.side_effect
+
+    async def invoke(*args, **kwargs):
+        await asyncio.sleep(0.05)  # the analyst call is where both requests would overlap
+        return await build(*args, **kwargs)
+
+    slow.side_effect = invoke
+    patch(monkeypatch, slow)
+    data = card_market()
+    data.broker.redis = memory_redis({})
+
+    async def both():
+        sse = asyncio.create_task(collect(price_band_events(data, "005930")))
+        chat = asyncio.create_task(get_or_build_card(data, "005930"))
+        return await sse, await chat
+
+    frames, card = asyncio.run(both())
+    assert slow.await_count == 1
+    assert [event for event, _ in parse(frames)] == ["status", "price_bands", "done"]
+    # Whichever request waited got the other's cached card.
+    assert json.loads(dump(card["band"])) == parse(frames)[-1][1]["band"]
+
+
 def test_local_only_card_is_cached_briefly_even_when_analyst_answered(monkeypatch):
     # Every level cites a missing tag, so all three fail validation.
     async def invoke(role, instruction, context, schema, *, timeout):
