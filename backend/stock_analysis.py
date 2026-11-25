@@ -195,7 +195,8 @@ async def answer(state, account_numbers=()):
     allowed = with_rounded(set(context_numbers(context)))  # unlisted_number compares absolute values
     verified = await asyncio.to_thread(verify_results, [{
         "analysis_text": sections[1].strip(), "citations": reply.citations, "stock_code": "종합 진단",
-        "doc_map": {tag: tag for tag in sources}}], allowed=allowed)
+        "doc_map": {tag: tag for tag in sources}}], allowed=allowed,
+        near=[card["current_price"] for card in cards if card["current_price"] is not None])
     summary = next(iter(verified["verified_stock_results"]), {})
     if not summary.get("analysis_text"):
         raise llm.LLMUnavailable("No answer sentence passed verification", reason="응답 검증 실패")
@@ -220,9 +221,10 @@ def cited_sentences(text):
         yield text[start:].strip()
 
 
-def verify_results(raw, *, allowed):
+def verify_results(raw, *, allowed, near=()):
     """Drop each sentence that cites an unknown tag, carries a receipt number or a figure not in `allowed`.
 
+    `near` holds the target cards' current prices, which make small plain numbers around them price-like.
     Line breaks survive so paragraphs and list items keep their shape; tags stay as written.
     """
     verified, warnings = [], []
@@ -242,7 +244,7 @@ def verify_results(raw, *, allowed):
                 tags = TAG.findall(text)
                 missing = set(tags) - visible
                 receipt = RECEIPT.search(text)
-                number = not receipt and unlisted_number(text, allowed) is not None
+                number = not receipt and unlisted_number(text, allowed, near) is not None
                 order = definitive_order(text)
                 unknown.update(missing)
                 receipts = receipts or bool(receipt)

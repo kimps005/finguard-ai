@@ -286,3 +286,13 @@ def test_imperative_orders_are_dropped_but_review_conditions_are_kept(monkeypatc
     assert core == ("[P-2] 20일선 95원을 지키는지 보는 조건입니다. 반드시 확인 후 매수 검토 조건입니다. "
                     "당장 매도를 고려할 시점은 아닙니다.")
     assert "종합 진단 확정적 매수·매도 지시 문장 3개를 제외했습니다." in warnings
+
+
+def test_bare_number_near_a_card_current_price_must_be_listed(monkeypatch):
+    band = card_fixture("000001", "종목000001")["band"]  # current price 100
+    capture_answer(monkeypatch, reply(
+        "[P-2] 95 부근을 지키면 보유하는 조건입니다. 130 부근이 저항입니다. 2026년 실적을 지켜보는 조건입니다.", ["P-2"]))
+    state = answer_state([band], holdings=[position()])
+    core, _, warnings = asyncio.run(stock_analysis.answer(state))
+    assert core == "[P-2] 95 부근을 지키면 보유하는 조건입니다. 2026년 실적을 지켜보는 조건입니다."
+    assert "종합 진단 입력에 없는 수치가 있는 문장 1개를 제외했습니다." in warnings

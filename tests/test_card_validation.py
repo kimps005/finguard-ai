@@ -253,3 +253,11 @@ def test_overlong_fields_are_trimmed_by_the_validator_not_the_schema():
     assert 0 < len(card["summary"]) <= 400 and card["summary"].endswith("흐름입니다.")
     # The overlong risk is dropped and at most three valid risks are kept.
     assert [r["text"] for r in card["risks"]] == ["위험 1번", "위험 2번", "위험 3번"]
+
+
+def test_bare_number_near_a_small_current_price_is_price_like():
+    facts = [Fact("P-1", "현재가", D(785)), Fact("P-2", "스윙 저점", D(760)), Fact("P-3", "20일선", D(800))]
+    m = Materials(facts=facts, news=NEWS, docs=DOCS, current=D(785), atr=D(20))
+    assert validate_card(proposal(summary="770 부근 지지입니다."), m, LOCAL)["summary"] == ""
+    for text in ("760 부근 지지입니다.", "2026년 실적은 양호합니다.", "[P-2] 저점 근거입니다.", "10거래일 흐름입니다."):
+        assert validate_card(proposal(summary=text), m, LOCAL)["summary"] == text, text

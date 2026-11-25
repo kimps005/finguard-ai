@@ -62,7 +62,7 @@ def _known_tags(m: Materials) -> set[str]:
 def _text_ok(text: str, m: Materials, allowed: set[Decimal]) -> bool:
     if RECEIPT.search(text) or definitive_order(text) or any(tag not in _known_tags(m) for tag in TAG.findall(text)):
         return False
-    return unlisted_number(text, allowed) is None
+    return unlisted_number(text, allowed, (m.current,)) is None
 
 
 def _distance(price: Decimal, fact: Fact) -> Decimal:

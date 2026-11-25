@@ -27,6 +27,9 @@ DEFINITIVE_ORDER = re.compile(
 def definitive_order(text: str) -> bool:
     """True when `text` gives a firm buy/sell order rather than a condition to review."""
     return bool(DEFINITIVE_ORDER.search(text))
+# Counter words after a plain number ("10거래일", "3개", "2배", "5위") mark a count, not a price.
+_COUNTERS = tuple("일거개배위회번분시초차명건월")
+_NEAR_LOW, _NEAR_HIGH = Decimal("0.5"), Decimal("1.5")
 _MULTIPLIER = {"천": Decimal(1000), "만": Decimal(10000), "억": Decimal(10) ** 8}
 
 
@@ -85,13 +88,23 @@ def with_rounded(values) -> set[Decimal]:
     return out
 
 
-def _figures(text: str):
-    """(written form, absolute value) of each price-like figure: a unit, a multiplier or a large plain number."""
+def _near(value: Decimal, prices) -> bool:
+    return any(price * _NEAR_LOW <= value <= price * _NEAR_HIGH for price in prices)
+
+
+def _figures(text: str, near=()):
+    """(written form, absolute value) of each price-like figure: a unit, a multiplier or a large plain number.
+
+    A small plain number within ±50% of a price in `near` (a current price) is price-like too, so
+    "785 부근" counts for a sub-1,000원 stock; years ("2026년") and counted words ("10거래일") do not.
+    """
     for match in NUMBER.finditer(text):
         _, raw, mult, unit, year = match.groups()
         digits = raw.replace(",", "")
         if not (unit or mult) and (year or not ("," in raw or len(digits.split(".")[0]) >= 4)):
-            continue  # plain small number or a year, not a price-like figure
+            counted = text[match.end():match.end() + 1] in _COUNTERS
+            if year or counted or not _near(Decimal(digits), near):
+                continue  # plain small number or a year, not a price-like figure
         if unit == "주" and not mult and (raw == "2" or text[match.end():match.end() + 1] in _PERIOD_SUFFIX):
             continue  # "2주" is the card horizon; "3주간", "10주선" are periods, not share counts
         yield match[0].strip(), Decimal(digits) * _MULTIPLIER.get(mult, Decimal(1))
@@ -101,10 +114,11 @@ def figures(text: str) -> set[Decimal]:
     return {value for _, value in _figures(text)}
 
 
-def unlisted_number(text: str, allowed: set[Decimal]) -> str | None:
+def unlisted_number(text: str, allowed: set[Decimal], near=()) -> str | None:
     """The first price-like figure not in `allowed`, as written; None when all are listed.
 
     Figures compare by absolute value, so a listed -16.67 allows "-16.67%" and "16.67% 손실".
+    `near` holds current prices that make small plain numbers around them price-like.
     """
     listed = {abs(value) for value in allowed}
-    return next((written for written, value in _figures(text) if value not in listed), None)
+    return next((written for written, value in _figures(text, near) if value not in listed), None)
