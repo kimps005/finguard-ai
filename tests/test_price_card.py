@@ -1,0 +1,230 @@
+"""Analyst price card: local snapshot first, validated AI card second, Redis cache reuse."""
+
+import asyncio
+from datetime import date, datetime, timedelta
+from decimal import Decimal as D
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+from backend import dart_rag, llm, price_card
+from backend.broker import KST, DailyBar, Holding, Quote
+from backend.card_validation import CardAnalysis, LevelProposal, Risk
+from backend.main import price_band_events
+from backend.price_card import card_ttl, card_updates, get_or_build_card
+from backend.serialization import dump
+from backend.sync_stock_master import Stock
+
+from test_price_bands import NOW, RECEIPT, STOCK, collect, market, parse
+
+
+END = date(2026, 11, 20)
+CURRENT = D(10050)
+ETF = Stock("069500", None, "KR7069500007", None, "KODEX 200", "ETF", None, D(1))
+NEWS = [{"title": f"삼성전자 기사 {i}", "description": f"요약 {i}", "link": f"https://news.example/{i}",
+         "published_at": datetime(2026, 11, 19, 9, tzinfo=KST)} for i in range(1, 4)]
+
+
+def zigzag(count=85):
+    """Closes cycle 9,600..10,300 so swings, volume zones and ATR14 all exist."""
+    rows = []
+    for i in range(count):
+        close = D(10000) + D(100) * ((i % 8) - 4)
+        rows.append(DailyBar(END - timedelta(days=count - 1 - i), close, close + 80, close - 80, close,
+                             D(1000 + 10 * i)))
+    return tuple(rows)
+
+
+def card_market(stock=STOCK, now=NOW):
+    data = market(now)
+    data.broker.get_quote.return_value = Quote(stock.stock_code, CURRENT, "kis", change_pct=D("0.5"))
+    data.broker.get_daily_bars.return_value = zigzag()
+    data.external.get_news.return_value = NEWS
+    return data
+
+
+def facts_of(context):
+    return {fact["label"]: fact for fact in json.loads(context)["facts"]}
+
+
+def analyst(low_reason="[P-1] 현재가 아래 지지 후보입니다 [NEWS-2].", *, offsets=(103, 101, 200), summary=""):
+    async def invoke(role, instruction, context, schema, *, timeout):
+        assert role == "analyst" and schema is CardAnalysis and timeout == price_card.ANALYST_TIMEOUT
+        current = D(facts_of(context)["현재가"]["value"])
+        down, up, top = offsets
+        return CardAnalysis(
+            low=LevelProposal(price=str(current - down), basis=["P-1"], reason=low_reason),
+            high=LevelProposal(price=str(current + up), basis=["P-1"], reason="[P-1] 위 단기 고점 후보입니다."),
+            ceiling=LevelProposal(price=str(current + top), basis=["P-1"], reason="[P-1] 위 10거래일 상단입니다."),
+            summary=summary, risks=[Risk(text="실적 발표 예정 [NEWS-3]", basis=["NEWS-3"])], citations=[])
+    return AsyncMock(side_effect=invoke)
+
+
+def patch(monkeypatch, invoke, stock=STOCK, chunks=()):
+    monkeypatch.setattr(price_card, "fetch_stocks", AsyncMock(return_value={stock.stock_code: stock}))
+    search = AsyncMock(return_value=list(chunks))
+    monkeypatch.setattr(dart_rag, "search", search)
+    monkeypatch.setattr(llm, "invoke", invoke)
+    return search
+
+
+def sources(snapshot):
+    return {key: level["source"] for key, level in snapshot["band"]["levels"].items()}
+
+
+def test_card_streams_local_then_validated_ai_card(monkeypatch):
+    invoke = analyst(summary="향후 2주간 [P-1] 부근 등락이 예상됩니다.")
+    patch(monkeypatch, invoke, chunks=[
+        {"rcept_no": RECEIPT, "report_nm": "분기보고서", "chunk_text": "매출이 늘었다."}])
+    data = card_market()
+
+    events = parse(asyncio.run(collect(price_band_events(data, "005930"))))
+    assert [event for event, _ in events] == ["status", "price_bands", "done"]
+    preliminary, final = events[1][1]["band"], events[2][1]["band"]
+    assert events[2][1]["ok"] is True
+
+    assert set(preliminary["levels"]) == set(final["levels"]) == {"buy_zone", "sell_zone", "peak_limit"}
+    assert {level["source"] for level in preliminary["levels"].values()} == {"local"}
+    assert preliminary["ai_status"] == "local" and preliminary["horizon_sessions"] == 10
+    assert final["ai_status"] == "ai" and final["horizon_sessions"] == 10
+    # STOCK tick for 10,000~20,000 won is 10 won.
+    assert {key: level["price"] for key, level in final["levels"].items()} == {
+        "buy_zone": "9950", "sell_zone": "10150", "peak_limit": "10250"}
+    assert final["levels"]["buy_zone"]["basis"] == ["P-1"]
+    assert final["levels"]["buy_zone"]["current_pct"] == "-1.00"
+    assert final["summary"] == "향후 2주간 [P-1] 부근 등락이 예상됩니다."
+    assert final["risks"] == [{"text": "실적 발표 예정 [NEWS-3]", "basis": ["NEWS-3"]}]
+    # Only cited news are listed; DOC-1 was offered but never cited.
+    assert [row["alias"] for row in final["news"]] == ["NEWS-2", "NEWS-3"]
+    assert final["news"][0] == {"alias": "NEWS-2", "title": "삼성전자 기사 2", "link": "https://news.example/2"}
+    assert final["disclosures"] == [] and final["warnings"] == []
+    for key in ("change_pct", "position_pct", "indicative", "ma20", "recent_range", "flow"):
+        assert key in final, key
+
+    # Price-like facts reach the prompt and the snapshot as whole won.
+    context = invoke.await_args.args[2]
+    prompt_facts = json.loads(context)["facts"]
+    assert final["facts"] == prompt_facts
+    labels = [fact["label"] for fact in prompt_facts]
+    assert {"현재가", "5일선", "20일선", "60일선", "스윙 저점", "스윙 고점", "매물대", "ATR14"} <= set(labels)
+    for fact in prompt_facts:
+        for value in (fact["value"], fact["upper"]):
+            assert value is None or "." not in value, fact
+    assert "10거래일" in invoke.await_args.args[1]
+    assert [row["id"] for row in json.loads(context)["news"]] == ["NEWS-1", "NEWS-2", "NEWS-3"]
+    assert [row["id"] for row in json.loads(context)["docs"]] == ["DOC-1"]
+    assert "holding" not in json.loads(context)
+
+    start, end = data.broker.get_daily_bars.await_args.args[1:]
+    assert end == END and start == end - timedelta(days=120)
+    data.external.get_news.assert_awaited_once_with("삼성전자", limit=10)
+
+
+def test_partial_card_when_one_level_fails(monkeypatch):
+    patch(monkeypatch, analyst(low_reason="[NEWS-9] 없는 기사"))
+    snapshots = asyncio.run(collect(card_updates(card_market(), "005930")))
+    final = snapshots[-1]["band"]
+    assert final["ai_status"] == "partial"
+    assert sources(snapshots[-1]) == {"buy_zone": "local", "sell_zone": "ai", "peak_limit": "ai"}
+    assert final["warnings"] == ["AI 단기 저점 검증 실패로 기본 계산을 사용했습니다."]
+
+
+def test_analyst_outage_still_finishes_with_local_card(monkeypatch):
+    patch(monkeypatch, AsyncMock(side_effect=llm.LLMUnavailable("offline")))
+    data = card_market()
+    events = parse(asyncio.run(collect(price_band_events(data, "005930"))))
+    assert [event for event, _ in events] == ["status", "price_bands", "done"]
+    final = events[2][1]
+    assert final["ok"] is True
+    assert final["band"]["ai_status"] == "local"
+    assert {level["source"] for level in final["band"]["levels"].values()} == {"local"}
+    assert len(final["band"]["warnings"]) >= 1
+    assert final["band"]["levels"] == events[1][1]["band"]["levels"]
+
+
+def test_cache_hit_skips_analyst_and_yields_once(monkeypatch):
+    invoke = analyst()
+    patch(monkeypatch, invoke)
+    store = {}
+    data = card_market()
+    data.broker.redis = SimpleNamespace(get=AsyncMock(side_effect=store.get),
+                                        set=AsyncMock(side_effect=lambda k, v, ex: store.update({k: v})))
+
+    first = asyncio.run(collect(card_updates(data, "005930")))
+    assert len(first) == 2
+    key = "finguard:price-card:v1:005930:2026-11-20"
+    data.broker.redis.set.assert_awaited_once_with(key, dump(first[-1]), ex=card_ttl(NOW))
+
+    second = asyncio.run(collect(card_updates(data, "005930")))
+    assert len(second) == 1
+    assert invoke.await_count == 1
+    assert dump(second[0]) == dump(first[-1])
+    assert second[0] == first[-1]
+    assert asyncio.run(get_or_build_card(data, "005930")) == first[-1]
+    data.broker.get_daily_bars.assert_awaited_once()
+
+
+def test_cache_failure_only_logs(monkeypatch):
+    patch(monkeypatch, analyst())
+    data = card_market()
+    data.broker.redis = SimpleNamespace(get=AsyncMock(side_effect=ConnectionError("down")),
+                                        set=AsyncMock(side_effect=ConnectionError("down")))
+    snapshots = asyncio.run(collect(card_updates(data, "005930")))
+    assert len(snapshots) == 2 and snapshots[-1]["band"]["ai_status"] == "ai"
+
+
+def test_cache_key_and_ttl():
+    assert price_card.CACHE_KEY.format(code="005930", session="2026-11-20") == "finguard:price-card:v1:005930:2026-11-20"
+    assert card_ttl(datetime(2026, 11, 20, 10, tzinfo=KST)) == 600                          # 금 장중
+    assert card_ttl(datetime(2026, 11, 19, 16, tzinfo=KST)) == 16 * 3600 + 30 * 60          # 목 마감 후 → 금 08:30
+    assert card_ttl(datetime(2026, 11, 20, 16, tzinfo=KST)) == 64 * 3600 + 30 * 60          # 금 마감 후 → 월 08:30
+    assert card_ttl(datetime(2026, 11, 23, 7, tzinfo=KST)) == 90 * 60                       # 월 개장 전 → 당일 08:30
+    assert card_ttl(datetime(2026, 11, 22, 12, tzinfo=KST)) == 20 * 3600 + 30 * 60          # 일 → 월 08:30
+
+
+def held(average="9876.4", weight="0.2512", profit="1.76"):
+    return Holding("005930", "삼성전자", "STOCK", "00126380", None, D(10), D(average), CURRENT,
+                   D(98764), D(100500), D(1736), D(profit), D(weight))
+
+
+def test_holding_numbers_are_allowed_only_when_held(monkeypatch):
+    reason = "[P-1] 아래이며 평단 9,876원과 비중 25.12%를 고려한 지지 후보입니다."
+
+    invoke = analyst(low_reason=reason)
+    patch(monkeypatch, invoke)
+    data = card_market()
+    data.broker.get_balance.return_value = SimpleNamespace(holdings=(held(),))
+    final = asyncio.run(get_or_build_card(data, "005930"))["band"]
+    assert final["levels"]["buy_zone"]["source"] == "ai"
+    holding = json.loads(invoke.await_args.args[2])["holding"]
+    assert holding == {"average_price": "9876", "weight_pct": "25.12", "profit_loss_pct": "1.76"}
+    data.broker.get_balance.assert_awaited_once_with()
+
+    for balance in (SimpleNamespace(holdings=()), RuntimeError("broker down")):
+        invoke = analyst(low_reason=reason)
+        patch(monkeypatch, invoke)
+        data = card_market()
+        if isinstance(balance, Exception):
+            data.broker.get_balance.side_effect = balance
+        else:
+            data.broker.get_balance.return_value = balance
+        final = asyncio.run(get_or_build_card(data, "005930"))["band"]
+        assert final["levels"]["buy_zone"]["source"] == "local"
+        assert "holding" not in json.loads(invoke.await_args.args[2])
+
+
+def test_etf_skips_disclosures_and_uses_5_won_tick(monkeypatch):
+    search = patch(monkeypatch, analyst(), stock=ETF)
+    data = card_market(stock=ETF)
+    snapshots = asyncio.run(collect(card_updates(data, "069500")))
+    final = snapshots[-1]["band"]
+    assert final["ai_status"] == "ai"
+    # 10,050 - 103 = 9,947 -> 9,945 on the 5-won ETF tick (a stock would round to 9,950).
+    assert {key: level["price"] for key, level in final["levels"].items()} == {
+        "buy_zone": D(9945), "sell_zone": D(10150), "peak_limit": D(10250)}
+    assert final["disclosures"] == []
+    search.assert_not_awaited()
+    data.etl.ingest_missing_stock.assert_not_awaited()
+    data.etl.has_recent_chunks.assert_not_awaited()
+    data.broker.get_daily_bars.assert_awaited_once_with(
+        "069500", END - timedelta(days=120), END, asset_type="ETF")

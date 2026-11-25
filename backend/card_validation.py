@@ -14,6 +14,7 @@ LEVELS = ("low", "high", "ceiling")
 LEVEL_NAMES = {"low": "단기 저점", "high": "단기 고점", "ceiling": "단기 천장"}
 ATR_WARNING = "변동성 자료 부족으로 기본 계산을 사용했습니다."
 _NUMBER = re.compile(r"(?<![0-9.,A-Za-z-])([0-9][0-9,]*(?:\.[0-9]+)?)(?:\s?([천만억]))?(?:\s?(원|주|%))?(년)?")
+_PERIOD_SUFFIX = tuple("간일차봉선째")
 _MULTIPLIER = {"천": Decimal(1000), "만": Decimal(10000), "억": Decimal(10) ** 8}
 
 
@@ -70,10 +71,13 @@ def _known_tags(m: Materials) -> set[str]:
 def _text_ok(text: str, m: Materials, allowed: set[Decimal]) -> bool:
     if RECEIPT.search(text) or any(tag not in _known_tags(m) for tag in TAG.findall(text)):
         return False
-    for raw, mult, unit, year in _NUMBER.findall(text):
+    for match in _NUMBER.finditer(text):
+        raw, mult, unit, year = match.groups()
         digits = raw.replace(",", "")
         if not (unit or mult) and (year or not ("," in raw or len(digits.split(".")[0]) >= 4)):
             continue  # plain small number or a year, not a price-like figure
+        if unit == "주" and not mult and (raw == "2" or text[match.end():match.end() + 1] in _PERIOD_SUFFIX):
+            continue  # "2주" is the card horizon; "3주간", "10주선" are periods, not share counts
         if Decimal(digits) * _MULTIPLIER.get(mult, Decimal(1)) not in allowed:
             return False
     return True

@@ -1,4 +1,4 @@
-"""Characterization tests for the one-month price band stream and the candle endpoint."""
+"""Characterization tests for the price band streams and the candle endpoint."""
 
 import asyncio
 from datetime import date, datetime, timedelta
@@ -10,8 +10,9 @@ from unittest.mock import AsyncMock, create_autospec
 import httpx
 import pytest
 
-from backend import dart_rag, llm, price_bands
+from backend import dart_rag, llm, price_bands, price_card
 from backend.broker import KST, BrokerConnector, Candle, DailyBar, FiveDayFlow, Holding, InvestorFlow, Quote
+from backend.card_validation import CardAnalysis, LevelProposal
 from backend.dart_etl import DartETL
 from backend.main import app, price_band_events
 from backend.sync_stock_master import Stock
@@ -54,9 +55,12 @@ def market(now=NOW):
     broker.get_quote.return_value = Quote("005930", D(105), "kis", change_pct=D("1.5"))
     broker.get_daily_bars.return_value = bars()
     broker.get_five_day_flow.return_value = flow()
+    broker.get_balance.return_value = SimpleNamespace(holdings=())
+    broker.redis = AsyncMock(get=AsyncMock(return_value=None), set=AsyncMock())
     etl = create_autospec(DartETL, instance=True)
     etl.has_recent_chunks.return_value = True
-    return SimpleNamespace(broker=broker, etl=etl)
+    external = SimpleNamespace(get_news=AsyncMock(return_value=[]))
+    return SimpleNamespace(broker=broker, etl=etl, external=external)
 
 
 def test_market_band_levels_from_recent_range_and_flow():
@@ -77,11 +81,13 @@ def test_market_band_without_history_is_indicative():
 
 
 def test_target_stream_sends_local_band_then_cited_disclosure(monkeypatch):
-    monkeypatch.setattr(price_bands, "fetch_stocks", AsyncMock(return_value={"005930": STOCK}))
+    monkeypatch.setattr(price_card, "fetch_stocks", AsyncMock(return_value={"005930": STOCK}))
     monkeypatch.setattr(dart_rag, "search", AsyncMock(return_value=[
         {"rcept_no": RECEIPT, "report_nm": f"실적 공시 {RECEIPT}", "chunk_text": "영업이익이 늘었다."}]))
-    answer = price_bands.BandAnalysis(analysis_text="요약", citations=["DOC-1"], reasons=[price_bands.Reasons(
-        name="삼성전자", buy="[DOC-1] 실적 개선 공시가 지지 근거입니다.", sell="", ceiling="")])
+    level = LevelProposal(price="100", basis=["P-2"], reason="[DOC-1] 실적 개선 공시가 지지 근거입니다.")
+    answer = CardAnalysis(low=level, high=LevelProposal(price="110", basis=["P-2"], reason="저항 후보"),
+                          ceiling=LevelProposal(price="120", basis=["P-2"], reason="상단 후보"),
+                          summary="", risks=[], citations=["DOC-1"])
     invoke = AsyncMock(return_value=answer)
     monkeypatch.setattr(llm, "invoke", invoke)
     data = market()
@@ -94,12 +100,17 @@ def test_target_stream_sends_local_band_then_cited_disclosure(monkeypatch):
     assert set(final["band"]["levels"]) == {"buy_zone", "sell_zone", "peak_limit"}
     assert final["band"]["change_pct"] == "1.5"
     assert preliminary["band"]["disclosures"] == []
+    # 20 flat bars: P-2 is the 100-won 5-day average and ATR14 is 20 won, so all three levels pass.
+    assert final["band"]["ai_status"] == "ai"
     assert final["band"]["disclosures"] == [
         {"alias": "DOC-1", "title": "실적 공시 (공시번호 생략)", "receipt": RECEIPT}]
     assert final["band"]["levels"]["buy_zone"]["reason"] == "[DOC-1] 실적 개선 공시가 지지 근거입니다."
-    assert final["band"]["levels"]["sell_zone"] == preliminary["band"]["levels"]["sell_zone"]
+    assert {key: level["price"] for key, level in final["band"]["levels"].items()} == {
+        "buy_zone": "100", "sell_zone": "110", "peak_limit": "120"}
+    assert {level["source"] for level in preliminary["band"]["levels"].values()} == {"local"}
     # The cloud prompt carries masked disclosures, not receipts.
     assert RECEIPT not in invoke.await_args.args[2]
+    assert "(공시번호 생략)" in invoke.await_args.args[2]
     data.etl.ingest_missing_stock.assert_awaited_once_with(
         "005930", "00126380", NOW.date() - timedelta(days=60), NOW.date())
 
@@ -110,21 +121,21 @@ def test_target_stream_sends_local_band_then_cited_disclosure(monkeypatch):
     (NOW.replace(hour=15, minute=40), date(2026, 11, 20)),
 ])
 def test_daily_bars_end_on_the_last_confirmed_session(monkeypatch, now, end):
-    monkeypatch.setattr(price_bands, "fetch_stocks", AsyncMock(return_value={"005930": STOCK}))
+    monkeypatch.setattr(price_card, "fetch_stocks", AsyncMock(return_value={"005930": STOCK}))
     monkeypatch.setattr(llm, "invoke", AsyncMock(side_effect=llm.LLMUnavailable("offline")))
     monkeypatch.setattr(dart_rag, "search", AsyncMock(return_value=[]))
     data = market(now)
     asyncio.run(collect(price_band_events(data, "005930")))
     data.broker.get_daily_bars.assert_awaited_once_with(
-        "005930", end - timedelta(days=60), end, asset_type="STOCK")
+        "005930", end - timedelta(days=price_card.BAR_DAYS), end, asset_type="STOCK")
 
 
 def test_unknown_or_unpriced_stock_ends_with_error(monkeypatch):
-    monkeypatch.setattr(price_bands, "fetch_stocks", AsyncMock(return_value={}))
+    monkeypatch.setattr(price_card, "fetch_stocks", AsyncMock(return_value={}))
     events = parse(asyncio.run(collect(price_band_events(market(), "999999"))))
     assert events[1:] == [("error", {"message": "등록된 종목을 찾을 수 없습니다."}), ("done", {"ok": False})]
 
-    monkeypatch.setattr(price_bands, "fetch_stocks", AsyncMock(return_value={"005930": STOCK}))
+    monkeypatch.setattr(price_card, "fetch_stocks", AsyncMock(return_value={"005930": STOCK}))
     data = market()
     data.broker.get_quote.side_effect = RuntimeError("down")
     data.broker.get_daily_bars.return_value = ()
@@ -132,19 +143,30 @@ def test_unknown_or_unpriced_stock_ends_with_error(monkeypatch):
     assert events[1][0] == "error" and "현재가와 최근 종가" in events[1][1]["message"]
 
 
-def test_portfolio_stream_orders_holdings_by_weight(monkeypatch):
-    monkeypatch.setattr(llm, "invoke", AsyncMock(side_effect=llm.LLMUnavailable("offline")))
-    monkeypatch.setattr(dart_rag, "search", AsyncMock(return_value=[]))
+def test_portfolio_stream_orders_holdings_by_weight_with_local_levels_only(monkeypatch):
+    invoke = AsyncMock(side_effect=AssertionError("portfolio mode must not call an LLM"))
+    monkeypatch.setattr(llm, "invoke", invoke)
+    search = AsyncMock(return_value=[])
+    monkeypatch.setattr(dart_rag, "search", search)
     data = market()
     data.broker.get_balance.return_value = SimpleNamespace(holdings=(
         holding("000002", "0.2"), holding("000001", "0.5", corp_code="00000001")))
     events = parse(asyncio.run(collect(price_band_events(data))))
     assert [event for event, _ in events] == ["status", "price_bands", "done"]
-    bands = events[2][1]["bands"]
-    assert [band["stock_code"] for band in bands] == ["000001", "000002"]
-    assert set(bands[0]["levels"]) == {"buy", "sell", "ceiling"}
-    assert bands[0]["average_price"] == "100" and "average_pct" in bands[0]["levels"]["sell"]
-    data.etl.ingest_stock.assert_awaited_once()
+    preliminary, final = events[1][1]["bands"], events[2][1]["bands"]
+    assert [band["stock_code"] for band in final] == ["000001", "000002"]
+    assert set(final[0]["levels"]) == {"buy", "sell", "ceiling"}
+    assert final[0]["average_price"] == "100" and "average_pct" in final[0]["levels"]["sell"]
+    local, _ = price_bands.calculate_band(holding("000001", "0.5"), bars(), flow())
+    for snapshot in (preliminary, final):
+        assert {key: level["price"] for key, level in snapshot[0]["levels"].items()} == {
+            key: format(level["price"], "f") for key, level in local["levels"].items()}
+        assert snapshot[0]["levels"]["buy"]["reason"] == local["levels"]["buy"]["reason"]
+        assert all(band["disclosures"] == [] for band in snapshot)
+    assert preliminary == final
+    invoke.assert_not_awaited()
+    search.assert_not_awaited()
+    data.etl.ingest_stock.assert_not_awaited()
 
 
 class MemoryRedis:

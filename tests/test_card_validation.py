@@ -194,3 +194,19 @@ def test_number_guard_covers_multipliers_and_unitless_prices():
         assert validate_card(proposal(summary=text), M, LOCAL)["summary"] == "", text
     m = Materials(facts=FACTS, news=NEWS, docs=DOCS, current=D(3100), atr=D(60), extra_numbers={D(3000)})
     assert validate_card(proposal(summary="기준 3천원입니다."), m, LOCAL)["summary"] == "기준 3천원입니다."
+
+
+def test_period_words_after_ju_are_not_share_counts():
+    for text in ("향후 2주간 박스권입니다.", "3주차 흐름입니다.", "10주선 위에 있습니다.",
+                 "5주봉 기준입니다.", "4주일 동안 횡보했습니다.", "2주째 상승입니다."):
+        assert validate_card(proposal(summary=text), M, LOCAL)["summary"] == text, text
+    for text in ("100주를 매수합니다.", "3주 보유 중입니다."):
+        assert validate_card(proposal(summary=text), M, LOCAL)["summary"] == "", text
+
+
+def test_literal_two_week_horizon_is_allowed():
+    text = "2주 상단은 [P-4] 매물대입니다."
+    assert validate_card(proposal(summary=text), M, LOCAL)["summary"] == text
+    ok = validate_card(proposal(ceiling=("3290", ["P-4"], "2주 상단 매물대")), M, LOCAL)
+    assert ok["levels"]["ceiling"]["source"] == "ai"
+    assert validate_card(proposal(summary="12주 보유 중입니다."), M, LOCAL)["summary"] == ""
