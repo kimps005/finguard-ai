@@ -26,6 +26,8 @@ card_builds: dict[str, asyncio.Task] = {}
 HORIZON_SESSIONS = 10
 BAR_DAYS = 120
 ANALYST_TIMEOUT = 60
+# Whole build (news, DART, analyst, validation, cache write); a hung build must not block its key forever.
+BUILD_TIMEOUT = 150
 BALANCE_TIMEOUT = 5
 CACHE_KEY = "finguard:price-card:v1:{code}:{session}"
 NEWS_LIMIT = 10
@@ -302,7 +304,9 @@ async def card_updates(market, stock_code: str):
 
 
 async def final_card(market, stock, now, key, band, facts, holding) -> dict:
-    return await cached_card(market.broker, key) or await built_card(market, stock, now, key, band, facts, holding)
+    async with asyncio.timeout(BUILD_TIMEOUT):
+        return await cached_card(market.broker, key) or await built_card(
+            market, stock, now, key, band, facts, holding)
 
 
 def finish_build(key, task):

@@ -394,7 +394,10 @@ def test_build_survives_a_consumer_that_goes_away(monkeypatch):
     release = asyncio.Event()
     build = analyst().side_effect
 
+    entered = asyncio.Event()
+
     async def slow(*args, **kwargs):
+        entered.set()
         await release.wait()
         return await build(*args, **kwargs)
 
@@ -408,9 +411,10 @@ def test_build_survives_a_consumer_that_goes_away(monkeypatch):
     async def scenario():
         updates = card_updates(data, "005930")
         assert (await anext(updates))["band"]["ai_status"] == "local"
-        with pytest.raises(TimeoutError):
-            async with asyncio.timeout(0.1):
-                await anext(updates)  # chat gives up while the analyst is still running
+        consumer = asyncio.create_task(anext(updates))
+        await asyncio.wait_for(entered.wait(), 5)  # the analyst is running
+        consumer.cancel()  # chat gives up while the analyst is still running
+        await asyncio.gather(consumer, return_exceptions=True)
         await updates.aclose()
         assert invoke.await_count == 1 and store == {} and key in price_card.card_builds
         release.set()  # the build finishes without any consumer and writes the cache
@@ -429,7 +433,10 @@ def test_two_consumers_share_one_build(monkeypatch):
     release = asyncio.Event()
     build = analyst().side_effect
 
+    entered = asyncio.Event()
+
     async def slow(*args, **kwargs):
+        entered.set()
         await release.wait()
         return await build(*args, **kwargs)
 
@@ -442,7 +449,9 @@ def test_two_consumers_share_one_build(monkeypatch):
         first, second = card_updates(data, "005930"), card_updates(data, "005930")
         await first.__anext__(), await second.__anext__()
         a, b = asyncio.create_task(first.__anext__()), asyncio.create_task(second.__anext__())
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(entered.wait(), 5)
+        await asyncio.sleep(0)
+        assert not a.done() and not b.done()  # both wait on the one build
         release.set()
         return await a, await b
 
@@ -451,10 +460,15 @@ def test_two_consumers_share_one_build(monkeypatch):
     assert invoke.await_count == 1
 
 
-def test_failed_build_without_consumers_is_not_left_unretrieved(monkeypatch, recwarn):
+def test_failed_build_without_consumers_is_logged_and_removed(monkeypatch, caplog):
     import gc
 
+    fail = asyncio.Event()
+    started = asyncio.Event()
+
     async def boom(*args, **kwargs):
+        started.set()
+        await fail.wait()
         raise RuntimeError("build exploded")
 
     patch(monkeypatch, AsyncMock(side_effect=analyst().side_effect))
@@ -462,24 +476,54 @@ def test_failed_build_without_consumers_is_not_left_unretrieved(monkeypatch, rec
     data = card_market()
     data.broker.redis = memory_redis({})
     key = "finguard:price-card:v1:005930:2026-11-20"
-    errors = []
+    reported = []
 
     async def scenario():
-        asyncio.get_running_loop().set_exception_handler(lambda loop, context: errors.append(context))
+        asyncio.get_running_loop().set_exception_handler(lambda loop, context: reported.append(context))
         updates = card_updates(data, "005930")
         await anext(updates)
-        pending = asyncio.create_task(anext(updates))
-        await asyncio.sleep(0.05)  # the build is running; the consumer goes away
-        pending.cancel()
-        await asyncio.gather(pending, return_exceptions=True)
+        consumer = asyncio.create_task(anext(updates))
+        await asyncio.wait_for(started.wait(), 5)
+        consumer.cancel()  # the only consumer goes away while the build is live
+        await asyncio.gather(consumer, return_exceptions=True)
         await updates.aclose()
-        for _ in range(100):
+        assert key in price_card.card_builds
+        fail.set()
+        for _ in range(200):
             if key not in price_card.card_builds:
                 break
             await asyncio.sleep(0.01)
         gc.collect()
         await asyncio.sleep(0.01)
 
-    asyncio.run(scenario())
+    with caplog.at_level("WARNING", logger=price_card.logger.name):
+        asyncio.run(scenario())
     assert key not in price_card.card_builds
-    assert errors == []
+    assert "Price card build failed (RuntimeError)" in caplog.text
+    assert reported == []
+
+
+def test_hung_build_is_capped_and_its_key_freed(monkeypatch, caplog):
+    hang = asyncio.Event()
+
+    async def never(*args, **kwargs):
+        await hang.wait()
+
+    patch(monkeypatch, analyst())
+    monkeypatch.setattr(price_card, "built_card", never)
+    monkeypatch.setattr(price_card, "BUILD_TIMEOUT", 0.05)
+    data = card_market()
+    data.broker.redis = memory_redis({})
+    key = "finguard:price-card:v1:005930:2026-11-20"
+
+    async def scenario():
+        updates = card_updates(data, "005930")
+        await anext(updates)
+        with pytest.raises(TimeoutError):  # consumers see the failure like any other build error
+            await asyncio.wait_for(anext(updates), 5)
+        await asyncio.sleep(0)
+        return key in price_card.card_builds
+
+    with caplog.at_level("WARNING", logger=price_card.logger.name):
+        assert asyncio.run(scenario()) is False
+    assert "Price card build failed (TimeoutError)" in caplog.text
