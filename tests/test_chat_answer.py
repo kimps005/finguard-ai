@@ -160,6 +160,36 @@ def test_tags_from_two_cards_are_renumbered_without_collision(monkeypatch):
     assert "20261120000001" not in evidence and "news.example/a" not in evidence
 
 
+def test_answer_context_carries_material_text_and_accepts_tags_the_card_did_not_cite(monkeypatch):
+    uncited = "20261120000002"
+    band = card_fixture("000001", "알파", docs=(("발행결정", RECEIPT),))["band"]
+    band["materials"] = {
+        "docs": [{"alias": "DOC-1", "title": "발행결정", "text": "전환가액은 9,800원이다.", "receipt": RECEIPT},
+                 {"alias": "DOC-2", "title": "공급계약 체결", "text": "계약금액은 12억원이다.", "receipt": uncited},
+                 {"alias": "DOC-1", "title": "발행결정", "text": f"접수 {RECEIPT} 건이다.", "receipt": RECEIPT}],
+        "news": [{"alias": "NEWS-1", "title": "알파 수주", "summary": "대형 계약 보도",
+                  "published_at": "2026-11-19T09:00:00+09:00", "link": "https://news.example/a"}]}
+    calls = capture_answer(monkeypatch, reply(
+        "[DOC-2] 공급계약의 계약금액은 12억원으로 [P-2] 20일선 95원을 지키면 추가매수를 검토할 조건입니다. "
+        "[NEWS-1] 수주 보도도 있습니다.", ["DOC-2", "NEWS-1"]))
+    state = answer_state([band], query="알파 추가매수할까?")
+    core, sources, warnings = asyncio.run(stock_analysis.answer(state))
+    card = calls[0][2]["cards"][0]
+    # Every retrieved chunk goes with its text; receipts stay local even inside chunk text.
+    assert card["docs"] == [{"id": "DOC-1", "title": "발행결정", "text": "전환가액은 9,800원이다."},
+                            {"id": "DOC-2", "title": "공급계약 체결", "text": "계약금액은 12억원이다."},
+                            {"id": "DOC-1", "title": "발행결정", "text": "접수 (공시번호 생략) 건이다."}]
+    assert card["news"] == [{"id": "NEWS-1", "title": "알파 수주", "summary": "대형 계약 보도",
+                             "published_at": "2026-11-19T09:00:00+09:00"}]
+    raw = json.dumps(calls[0][2], ensure_ascii=False)
+    assert RECEIPT not in raw and uncited not in raw and "news.example" not in raw
+    # DOC-2 is not cited on the card but is a material the model saw, so the sentence survives.
+    assert warnings == [] and core.startswith("[DOC-2] 공급계약의 계약금액은 12억원으로")
+    evidence = answer_report(state, core, sources).split(EVIDENCE)[1]
+    assert f"[DOC-2](https://dart.fss.or.kr/dsaf001/main.do?rcpNo={uncited}) · 공급계약 체결" in evidence
+    assert "[NEWS-1](https://news.example/a) · 알파 수주" in evidence
+
+
 def test_sentence_with_unlisted_price_is_dropped_with_warning(monkeypatch):
     band = card_fixture("000001", "종목000001")["band"]
     capture_answer(monkeypatch, reply(

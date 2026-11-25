@@ -100,6 +100,8 @@ def card_contexts(rows):
 
     Every card numbers its own materials from 1, so two cards both cite [DOC-1]. One TagBook gives
     each fact, article and filing a single global tag; receipts and links never enter the context.
+    Every retrieved chunk (with its text) and article (with its summary) is offered, not only the
+    ones the card cites, so `sources` covers every tag the answer may cite.
     """
     book, cards, sources = TagBook(), [], {}
     for row in rows:
@@ -112,16 +114,32 @@ def card_contexts(rows):
             tag = mapping[fact["id"]] = book.alias("P", f"{code}:{fact['id']}")
             facts.append({**fact, "id": tag})
             sources[tag] = (fact_text(name, fact), None)
+        # Materials hold every retrieved article and chunk; a cached or older card may lack them,
+        # so a cited entry the materials do not repeat is still offered (title only).
+        materials = band.get("materials") or {}
+        offered = list(materials.get("news", []))
+        offered += [row for row in band["news"] if row["alias"] not in {a["alias"] for a in offered}]
         news = []
-        for article in band["news"]:
+        for article in offered:
             tag = mapping[article["alias"]] = book.alias("NEWS", article["link"] or f"{code}:{article['alias']}")
-            news.append({"id": tag, "title": mask_receipts(article["title"])})
+            entry = {"id": tag, "title": mask_receipts(article["title"])}
+            if article.get("summary"):
+                entry["summary"] = mask_receipts(article["summary"])
+            if article.get("published_at"):
+                entry["published_at"] = article["published_at"]
+            news.append(entry)
             link = article["link"] if WEB_LINK.match(article["link"] or "") else None
             sources.setdefault(tag, (article["title"], link))
+        chunks = list(materials.get("docs", []))
+        chunks += [doc for doc in band["disclosures"] if doc["alias"] not in {c["alias"] for c in chunks}]
         docs = []
-        for doc in band["disclosures"]:
+        for doc in chunks:
+            # One tag per filing: chunks of the same receipt share it, receipts never enter the context.
             tag = mapping[doc["alias"]] = book.alias("DOC", doc["receipt"])
-            docs.append({"id": tag, "title": mask_receipts(doc["title"])})
+            entry = {"id": tag, "title": mask_receipts(doc["title"])}
+            if doc.get("text"):
+                entry["text"] = mask_receipts(doc["text"])
+            docs.append(entry)
             sources.setdefault(tag, (doc["title"], doc["receipt"]))
 
         def rewrite(text):

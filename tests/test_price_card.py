@@ -144,6 +144,36 @@ def test_analyst_outage_still_finishes_with_local_card(monkeypatch):
     assert final["band"]["levels"] == events[1][1]["band"]["levels"]
 
 
+BAND_KEYS = {"stock_code", "name", "current_price", "change_pct", "position_pct", "indicative", "ma20",
+             "recent_range", "flow", "levels", "disclosures", "horizon_sessions", "summary", "risks", "news",
+             "facts", "ai_status", "warnings"}
+
+
+def test_local_card_carries_every_retrieved_material(monkeypatch):
+    other = "20261102000123"
+    patch(monkeypatch, AsyncMock(side_effect=llm.LLMUnavailable("offline")), chunks=[
+        {"rcept_no": RECEIPT, "report_nm": f"분기보고서 {RECEIPT}", "chunk_text": f"매출이 늘었다. 접수 {RECEIPT}."},
+        {"rcept_no": other, "report_nm": "전환사채 발행결정", "chunk_text": "전환가액은 9,800원이다."},
+        {"rcept_no": RECEIPT, "report_nm": "분기보고서", "chunk_text": "영업이익이 줄었다."}])
+    snapshots = asyncio.run(collect(card_updates(card_market(), "005930")))
+    preliminary, final = (snapshot["band"] for snapshot in snapshots)
+    # The local card goes out before news and DART are read.
+    assert preliminary["materials"] == {"docs": [], "news": []}
+    assert final["ai_status"] == "local"
+    # Every retrieved chunk, in search order, masked as AliasBook.document produces; one alias per filing.
+    masked = "(공시번호 생략)"
+    assert final["materials"]["docs"] == [
+        {"alias": "DOC-1", "title": f"분기보고서 {masked}", "text": f"매출이 늘었다. 접수 {masked}.", "receipt": RECEIPT},
+        {"alias": "DOC-2", "title": "전환사채 발행결정", "text": "전환가액은 9,800원이다.", "receipt": other},
+        {"alias": "DOC-1", "title": "분기보고서", "text": "영업이익이 줄었다.", "receipt": RECEIPT}]
+    assert final["materials"]["news"] == [
+        {"alias": f"NEWS-{i}", "title": f"삼성전자 기사 {i}", "summary": f"요약 {i}",
+         "published_at": "2026-11-19T09:00:00+09:00", "link": f"https://news.example/{i}"} for i in range(1, 4)]
+    # The UI-facing card keeps its shape: only cited filings and articles, which a local card has none of.
+    assert final["disclosures"] == [] and final["news"] == []
+    assert set(final) == set(preliminary) == BAND_KEYS | {"materials"}
+
+
 def test_cache_hit_skips_analyst_and_yields_once(monkeypatch):
     invoke = analyst()
     patch(monkeypatch, invoke)
@@ -224,7 +254,7 @@ def test_etf_skips_disclosures_and_uses_5_won_tick(monkeypatch):
     # 10,050 - 103 = 9,947 -> 9,945 on the 5-won ETF tick (a stock would round to 9,950).
     assert {key: level["price"] for key, level in final["levels"].items()} == {
         "buy_zone": D(9945), "sell_zone": D(10150), "peak_limit": D(10250)}
-    assert final["disclosures"] == []
+    assert final["disclosures"] == [] and final["materials"]["docs"] == []
     search.assert_not_awaited()
     data.etl.ingest_missing_stock.assert_not_awaited()
     data.etl.has_recent_chunks.assert_not_awaited()

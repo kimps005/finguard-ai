@@ -131,8 +131,12 @@ async def chart_inputs(market, stock, now) -> tuple[dict, list[Fact]]:
     return band, quantized_facts(valid, current, flow)
 
 
-async def reference_inputs(market, stock, now) -> tuple[dict, dict]:
-    """[NEWS-n] articles and [DOC-n] filings, masked of DART receipt numbers."""
+async def reference_inputs(market, stock, now) -> tuple[dict, dict, dict]:
+    """[NEWS-n] articles and [DOC-n] filings, masked of DART receipt numbers, and the materials list.
+
+    `materials` keeps every retrieved article and chunk (chunks in search order, one alias per filing)
+    for the answer model; the card itself lists only what the analyst cited.
+    """
     articles, chunks = await asyncio.gather(
         optional_data(market.external.get_news(stock.corp_name, limit=NEWS_LIMIT), 8, default=[]),
         disclosure_rows(market, stock, now),
@@ -140,16 +144,22 @@ async def reference_inputs(market, stock, now) -> tuple[dict, dict]:
     news = {}
     for index, article in enumerate((articles or [])[:NEWS_LIMIT], 1):
         alias = f"NEWS-{index}"
+        published = article.get("published_at")
         news[alias] = {"alias": alias, "title": mask_receipts(article["title"]), "link": article["link"],
                        "summary": mask_receipts(article.get("description") or ""),
-                       "published_at": article.get("published_at")}
-    docs, book = {}, AliasBook()
+                       "published_at": published.isoformat() if hasattr(published, "isoformat") else published}
+    docs, passages, book = {}, [], AliasBook()
     for row in chunks:
         document = book.document(row)
+        passages.append({"alias": document["source"], "title": document["title"], "text": document["text"],
+                         "receipt": row["rcept_no"]})
         entry = docs.setdefault(document["source"], {"alias": document["source"], "title": document["title"],
                                                      "receipt": row["rcept_no"], "text": ""})
         entry["text"] = " ".join(filter(None, (entry["text"], document["text"])))
-    return news, docs
+    materials = {"docs": passages,
+                 "news": [{key: row[key] for key in ("alias", "title", "summary", "published_at", "link")}
+                          for row in news.values()]}
+    return news, docs, materials
 
 
 def holding_numbers(holding) -> dict:
@@ -167,7 +177,7 @@ def build_materials(band, facts, news, docs, stock, holding) -> Materials:
 
 async def gather_materials(market, stock, holding, now) -> tuple[Materials, dict]:
     band, facts = await chart_inputs(market, stock, now)
-    news, docs = await reference_inputs(market, stock, now)
+    news, docs, _ = await reference_inputs(market, stock, now)
     return build_materials(band, facts, news, docs, stock, holding), band
 
 
@@ -201,7 +211,10 @@ def ai_status(levels) -> str:
     return "ai" if sources == {"ai"} else "local" if sources == {"local"} else "partial"
 
 
-def snapshot(now, band, facts, card) -> dict:
+NO_MATERIALS = {"docs": [], "news": []}
+
+
+def snapshot(now, band, facts, card, materials=NO_MATERIALS) -> dict:
     current = band["current_price"]
     levels = {TARGETS[name]: {"price": level["price"], "reason": level["reason"],
                               "current_pct": pct(level["price"], current),
@@ -221,6 +234,9 @@ def snapshot(now, band, facts, card) -> dict:
         "facts": fact_rows(facts),
         "ai_status": ai_status(card["levels"]),
         "warnings": list(card["warnings"]),
+        # Every retrieved chunk and article, for the answer model; the screen shows the cited ones above.
+        "materials": {"docs": [dict(doc) for doc in materials["docs"]],
+                      "news": [dict(row) for row in materials["news"]]},
     }}
 
 
@@ -293,7 +309,7 @@ async def cached_card(broker, key) -> dict | None:
 
 async def built_card(market, stock, now, key, band, facts, holding) -> dict:
     broker, local = market.broker, local_levels(band)
-    news, docs = await reference_inputs(market, stock, now)
+    news, docs, retrieved = await reference_inputs(market, stock, now)
     materials = build_materials(band, facts, news, docs, stock, holding)
 
     try:
@@ -302,7 +318,7 @@ async def built_card(market, stock, now, key, band, facts, holding) -> dict:
     except llm.LLMUnavailable as exc:
         logger.warning("Analyst card unavailable (%s)", exc.reason)
         analysis = None
-    final = snapshot(now, band, facts, validate_card(analysis, materials, local))
+    final = snapshot(now, band, facts, validate_card(analysis, materials, local), retrieved)
     # A local-only card is kept briefly so the next selection retries the analyst.
     ttl = min(card_ttl(now), SESSION_TTL) if final["band"]["ai_status"] == "local" else card_ttl(now)
     try:
