@@ -23,6 +23,16 @@ SHARE_FACTS = ("외국인 5일 순매수", "기관 5일 순매수")
 WEB_LINK = re.compile(r"^https?://\S+$", re.IGNORECASE)
 ACCOUNT_LIKE = re.compile(r"[0-9]{10,}|[0-9]{8}-?[0-9]{2}")
 ACCOUNT_PLACEHOLDER = "(계좌번호 생략)"
+# Links in the answer come only from the locally built 판단 근거; the model's own links are dropped.
+MD_LINK = re.compile(r"!?\[([^\]\n]*)\]\([^)\n]*\)")
+LINK_DEFINITION = re.compile(r"(?m)^[ \t]*\[[^\]\n]+\]:[ \t]*\S+.*$")
+BARE_LINK = re.compile(r"<(?:https?|ftp|mailto):[^>\s]*>|\b(?:https?://|www\.)[^\s<>()]+", re.IGNORECASE)
+
+
+def strip_links(text):
+    """Keep a markdown link's text, drop its URL, and remove autolinks and bare URLs."""
+    text = LINK_DEFINITION.sub("", MD_LINK.sub(lambda m: m[1], text))
+    return re.sub(r"[ \t]{2,}", " ", BARE_LINK.sub("", text))
 
 
 def mask_accounts(text, account_numbers=()):
@@ -194,7 +204,7 @@ async def answer(state, account_numbers=()):
         raise llm.LLMUnavailable("Invalid answer report format", reason="응답 형식 오류")
     allowed = with_rounded(set(context_numbers(context)))  # unlisted_number compares absolute values
     verified = await asyncio.to_thread(verify_results, [{
-        "analysis_text": sections[1].strip(), "citations": reply.citations, "stock_code": "종합 진단",
+        "analysis_text": strip_links(sections[1]).strip(), "citations": reply.citations, "stock_code": "종합 진단",
         "doc_map": {tag: tag for tag in sources}}], allowed=allowed,
         near=[card["current_price"] for card in cards if card["current_price"] is not None])
     summary = next(iter(verified["verified_stock_results"]), {})

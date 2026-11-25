@@ -296,3 +296,16 @@ def test_bare_number_near_a_card_current_price_must_be_listed(monkeypatch):
     core, _, warnings = asyncio.run(stock_analysis.answer(state))
     assert core == "[P-2] 95 부근을 지키면 보유하는 조건입니다. 2026년 실적을 지켜보는 조건입니다."
     assert "종합 진단 입력에 없는 수치가 있는 문장 1개를 제외했습니다." in warnings
+
+
+def test_llm_written_links_are_stripped_from_the_core_answer(monkeypatch):
+    band = card_fixture("000001", "종목000001")["band"]
+    capture_answer(monkeypatch, reply(
+        "[P-2] 20일선 95원을 지키는 조건입니다 [공시 보기](https://evil.example/a). "
+        "자세한 내용은 <https://evil.example/b> 또는 https://evil.example/c 와 www.evil.example 를 보세요. "
+        "![차트](https://evil.example/d.png) 흐름입니다.\n\n[ref]: https://evil.example/e", ["P-2"]))
+    state = answer_state([band], holdings=[position()])
+    core, _, _ = asyncio.run(stock_analysis.answer(state))
+    assert "evil.example" not in core and "](" not in core
+    assert "[P-2] 20일선 95원을 지키는 조건입니다 공시 보기." in core
+    assert "차트 흐름입니다." in core
