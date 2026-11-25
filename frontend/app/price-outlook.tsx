@@ -166,6 +166,7 @@ export default function PriceOutlook({ pin, pinHeader, stock, onStockChange, onU
   const activeCode = useRef(stock.stock_code);
   const requests = useRef(new Map<string, AbortController>());
   const snapshots = useRef(new Map<string, StockPriceBands>());
+  const previews = useRef(new Map<string, StockPriceBands>());
   const submitRequest = useRef<AbortController | null>(null);
   const composing = useRef(false);
 
@@ -174,7 +175,8 @@ export default function PriceOutlook({ pin, pinHeader, stock, onStockChange, onU
     activeCode.current = code;
     setError("");
     const cached = snapshots.current.get(code) ?? readCache(code);
-    setResult(cached);
+    // A preliminary frame is still worth showing, but it never counts as a cached result.
+    setResult(cached ?? previews.current.get(code) ?? null);
     if (requests.current.has(code)) {
       setRunning(true);
       return;
@@ -188,11 +190,18 @@ export default function PriceOutlook({ pin, pinHeader, stock, onStockChange, onU
     requests.current.set(code, controller);
     setRunning(true);
 
-    function show(snapshot: StockPriceBands) {
+    // Preliminary frames are shown (and kept as previews) but never cached, so an interrupted
+    // build never pins the 기본 계산 card; only the done frame reaches the caches.
+    function show(snapshot: StockPriceBands, final: boolean) {
       if (snapshot.band.stock_code !== code) return;
       const entry = { as_of: snapshot.as_of, band: snapshot.band };
-      snapshots.current.set(code, entry);
       if (activeCode.current === code) setResult(entry);
+      if (!final) {
+        previews.current.set(code, entry);
+        return;
+      }
+      previews.current.delete(code);
+      snapshots.current.set(code, entry);
       try {
         sessionStorage.setItem(CACHE_PREFIX + code, JSON.stringify(entry));
       } catch {
@@ -205,11 +214,11 @@ export default function PriceOutlook({ pin, pinHeader, stock, onStockChange, onU
                                 { pin, pinHeader, signal: controller.signal }, "가격 구간 분석을 시작할 수 없습니다.");
       for await (const item of events) {
         if (controller.signal.aborted) return;
-        if (item.event === "price_bands" && "band" in item.data) show(item.data);
+        if (item.event === "price_bands" && "band" in item.data) show(item.data, false);
         if (item.event === "error") throw new Error(item.data.message);
         if (item.event === "done") {
           if (!item.data.ok || !("band" in item.data)) throw new Error("가격 구간 분석을 완료할 수 없습니다.");
-          show(item.data);
+          show(item.data, true);
           return;
         }
       }
