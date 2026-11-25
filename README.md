@@ -228,7 +228,7 @@ finguard-ai/
 │   ├── benchmark_latency.py  # TTFE·TTFT·Warm/Cold 지연시간 벤치마크
 │   └── smoke_test_e2e.py     # FP16 VRAM 피크 + FastAPI·Next.js 실제 HTTP 스트림 검증
 ├── data/eval/ragas_benchmark_20.json  # 5대 공시 유형 × 4개 발행사 평가 데이터셋
-├── tests/                    # pytest (202개 수집)
+├── tests/                    # pytest (294개 수집)
 ├── docs/finguard_ai_prd_v3.8.md
 ├── docker-compose.yml        # frontend · backend(GPU) · db(pgvector) · redis
 ├── docker-compose.dev.yml    # 로컬 개발용 DB·Redis 루프백 포트 공개
@@ -423,7 +423,7 @@ finguard-ai/
 
 > 관련 커밋: `bab19be`
 
-**문제 상황.** KIS 키 없이 실행하면 시세·일봉·수급이 PyKRX로 대체됩니다. 이때 1개월 가격 밴드 분석이 "현재가와 최근 종가를 불러올 수 없습니다"로 자주 실패했습니다.
+**문제 상황.** KIS 키 없이 실행하면 시세·일봉·수급이 PyKRX로 대체됩니다. 이때 (당시) 1개월 가격 밴드 분석이 "현재가와 최근 종가를 불러올 수 없습니다"로 자주 실패했습니다.
 
 **원인 분석.** PyKRX는 첫 호출 때 KRX에 지연 로그인하는데 약 8초가 걸리고, 세션은 한 시간마다 만료됩니다. 가격 밴드는 시세·일봉·수급을 `asyncio.gather`로 동시에 요청하고 각각 10초 제한(`optional_data(…, 10)`)을 두는데, 세 요청이 모두 같은 로그인을 기다리다 제한 시간을 넘겼습니다.
 
@@ -445,7 +445,7 @@ finguard-ai/
 | `requirements.txt`가 한 줄만 바뀌어도 수 GB짜리 torch 휠을 다시 받음 | 설치 레이어가 무효화되고 `--no-cache-dir`로 pip 캐시도 없었습니다. | BuildKit `RUN --mount=type=cache,target=/root/.cache/pip`을 씁니다. 이미지 크기는 그대로이고 휠은 재사용됩니다. | `8ceb7b3`, `Dockerfile` |
 | 백엔드가 준비되기 전에 프론트엔드가 먼저 붙음 | `depends_on`이 컨테이너 시작만 기다렸습니다. | 백엔드 `/health` 헬스체크(`start_period: 120s`)가 통과한 뒤에 프론트엔드를 시작합니다. | `f325859`, `docker-compose.yml` |
 | 증권사 API 호출 제한 | 병렬 수집이 KIS에 동시 호출을 몰아 보내면 제한 응답(`EGW00201`, `EGW00133`)이나 429·5xx가 돌아옵니다. | 프로세스 공유 `Semaphore(2)`로 동시 호출을 2개로 묶고, 408·429·5xx와 위 응답 코드는 0.25초 → 0.5초 → 1초 간격으로 재시도합니다. | `broker/kis.py` |
-| Fast Path 첫 토큰 지연 | 라우터 LLM 응답 시간이 단순 조회의 첫 토큰을 늦춥니다. | 정규식 분류가 `fast_lookup`이면 LLM 대기를 250ms로 제한합니다. Fast Path는 DART·ECOS·RAG·ETL을 거치지 않습니다. | `portfolio_graph.router_node`, `test_fast_path_stream_and_latency` |
+| Fast Path 첫 토큰 지연 | (당시) 라우터 LLM 응답 시간이 단순 조회의 첫 토큰을 늦췄습니다. | 처음에는 정규식 분류가 `fast_lookup`이면 LLM 대기를 250ms로 제한했고, 이후 라우터 LLM 자체를 없애 분류를 정규식만으로 합니다. Fast Path는 DART·ECOS·RAG·ETL을 거치지 않습니다. | `portfolio_graph.router_node`, `test_fast_path_stream_and_latency` |
 
 ---
 
@@ -626,7 +626,7 @@ TTFE, Fast Path TTFT, Warm Cache는 표본의 최댓값을 사용하고 Cold Cac
 
 | 영역 | 내용 |
 | --- | --- |
-| Python (pytest, 202개 수집) | Decimal 계산 경계값, 스키마 제약, 정정공시 순서 역전 재적재, 표 청킹, 하이브리드 검색 실행계획, GPU 직렬화·취소, 분산 락, LLM 대체 경로, 빈 Fan-Out, 가드레일, LLM 전면 장애, 소스별 장애 격리, 커넥션 풀 상태 초기화 |
+| Python (pytest, 294개 수집) | Decimal 계산 경계값, 스키마 제약, 정정공시 순서 역전 재적재, 표 청킹, 하이브리드 검색 실행계획, GPU 직렬화·취소, 분산 락, LLM 대체 경로, 빈 Fan-Out, 가드레일, LLM 전면 장애, 소스별 장애 격리, 커넥션 풀 상태 초기화 |
 | 프론트엔드 (`node --test`) | PIN 프록시, JSON 프록시 에러 차단, SSE 파서, 진단 reducer, 진행 단계 라벨 |
 | E2E 스모크 | FP16 VRAM 피크 측정 + 임시 루프백 서버에서 FastAPI·Next.js 실제 HTTP 스트림 검증 |
 
