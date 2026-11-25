@@ -262,6 +262,34 @@ def test_etf_skips_disclosures_and_uses_5_won_tick(monkeypatch):
         "069500", END - timedelta(days=120), END, asset_type="ETF")
 
 
+def test_disclosure_search_budget_covers_a_cold_model_load(monkeypatch):
+    # Measured 2026-11-26 (RTX GPU, fresh process): Kiwi 1.8s + bge-m3/reranker load 16.3s + first encode
+    # 1.0s = 19.1s cold; 0.6s warm. An 8s budget dropped every DART chunk from the first card after a start.
+    patch(monkeypatch, analyst())
+
+    async def search(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(dart_rag, "search", search)
+    budgets = {}
+    original = price_card.optional_data
+
+    async def spy(operation, timeout, **kwargs):
+        budgets[getattr(operation, "__name__", repr(operation))] = timeout
+        return await original(operation, timeout, **kwargs)
+
+    monkeypatch.setattr(price_card, "optional_data", spy)
+    data = card_market()
+    data.etl.has_recent_chunks.return_value = True
+    asyncio.run(collect(card_updates(data, "005930")))
+
+    search_budget = budgets["search"]
+    assert search_budget >= 25
+    # Reference inputs, the analyst and its single fallback still fit inside the whole-build cap.
+    # 8s on-demand ingest + 3s chunk check run before the search (news runs beside them, capped at 8s).
+    assert 8 + 3 + search_budget + price_card.ANALYST_TIMEOUT + llm.FALLBACK_TIMEOUT <= price_card.BUILD_TIMEOUT
+
+
 def memory_redis(store):
     return SimpleNamespace(get=AsyncMock(side_effect=store.get),
                            set=AsyncMock(side_effect=lambda k, v, ex: store.update({k: v})))

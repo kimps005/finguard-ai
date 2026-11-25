@@ -32,6 +32,9 @@ BALANCE_TIMEOUT = 5
 CACHE_KEY = "finguard:price-card:v1:{code}:{session}"
 NEWS_LIMIT = 10
 DISCLOSURE_DAYS = 60
+# Cold start, measured 2026-11-26 in a fresh process: Kiwi 1.8s + bge-m3/reranker load 16.3s + first encode
+# 1.0s = 19.1s. Steady state is 0.6s. Worst case 8 + 3 + 30 + ANALYST 60 + fallback 30 = 131s < BUILD_TIMEOUT.
+SEARCH_TIMEOUT = 30
 SESSION_TTL = 600
 MARKET_OPEN, MARKET_CLOSE, CARD_REFRESH = time(9), time(15, 30), time(8, 30)
 # calculate_market_band level -> validate_card level -> snapshot key the frontend reads.
@@ -113,7 +116,7 @@ async def disclosure_rows(market, stock, now):
     if not await optional_data(market.etl.has_recent_chunks(stock.corp_code, start, on), 3):
         return []
     return await optional_data(dart_rag.search(stock.corp_code, DISCLOSURE_QUERY, limit=3,
-                                               since=start, until=on), 8, default=[]) or []
+                                               since=start, until=on), SEARCH_TIMEOUT, default=[]) or []
 
 
 async def chart_inputs(market, stock, now) -> tuple[dict, list[Fact]]:
