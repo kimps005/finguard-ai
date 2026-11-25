@@ -190,6 +190,26 @@ def test_answer_context_carries_material_text_and_accepts_tags_the_card_did_not_
     assert "[NEWS-1](https://news.example/a) · 알파 수주" in evidence
 
 
+def test_answer_report_evidence_names_the_simulated_stock_and_each_held_target():
+    held = position()
+    band = card_fixture("000001", held.name)["band"]
+    state = answer_state([band, card_fixture("005930", "미보유")["band"]], holdings=[held])
+    state["simulation_result"] = {"stock_code": "000001", "invested_amount": D(200), "buy_quantity": D(2),
+                                  "average_price": D("113.333"), "remaining_cash": D(300),
+                                  "weight": D("0.3"), "weight_change": D("0.1")}
+    state["quant_scorecards"] = {"000001": {"dilution_pct": D("0.1"), "total": 90, "scores": {
+        "flow": 25, "momentum": 25, "earnings": 25, "overhang": 15}}}
+    evidence = answer_report(state, "핵심", []).split(EVIDENCE)[1].strip().splitlines()
+    # No score inputs: the price line has no 20-day average; the non-held card gets no holding lines.
+    assert evidence == [
+        f"- 매수 시뮬레이션 · {held.name} · 투자 금액 200원, 매수 수량 2주, 예상 평단가 113원",
+        f"- {held.name} · 현재가 100원, 평단가 120원",
+        f"- {held.name} · 오버행 희석률 0.1%",
+        f"- {held.name} · 수급 25, 모멘텀 25, 실적 25, 오버행 15점 (합계 90/100)",
+        f"- {held.name} 2주 가격 카드 · 현재가 100원, 단기 저점 95원, 단기 고점 105원, 2주 상단 110원",
+        "- 미보유 2주 가격 카드 · 현재가 100원, 단기 저점 95원, 단기 고점 105원, 2주 상단 110원"]
+
+
 def test_sentence_with_unlisted_price_is_dropped_with_warning(monkeypatch):
     band = card_fixture("000001", "종목000001")["band"]
     capture_answer(monkeypatch, reply(

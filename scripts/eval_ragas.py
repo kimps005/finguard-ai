@@ -1,10 +1,16 @@
-"""Evaluate issuer retrieval, stock analysis and the streamed portfolio report."""
+"""Evaluate issuer retrieval and the answer model's streamed portfolio report.
+
+Each case runs the production chat graph: router, market data, scorecards and simulation, the real
+price-card builder (fed a fixed market snapshot) and the answer model with its verifier. The analyst
+is blocked in both modes so every card is the local card with the same retrieved materials, and a
+comparison run (--answer-model) varies only the answer model.
+"""
 
 import argparse
 import asyncio
 from collections import Counter
 from contextlib import asynccontextmanager, nullcontext
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 import json
 import math
@@ -22,11 +28,12 @@ if __package__ in (None, ""):
 import psycopg
 from psycopg import sql
 
-from backend import dart_rag, llm, stock_analysis
-from backend.broker import Balance, DailyBar, FiveDayFlow, Holding, InvestorFlow
+from backend import dart_rag, llm, price_card, stock_analysis
+from backend.broker import Balance, DailyBar, FiveDayFlow, Holding, InvestorFlow, Quote
 from backend.dart_etl import INSERT_CHUNK
 from backend.finance_calc import ANNUAL, THIRD, LockupRelease, calculate_scorecard, simulate_purchase
 from backend.main import chat_events
+from backend.market_time import KST
 from backend.portfolio_graph import build_graph
 from backend.portfolio_market import ScoreInputs
 from backend.serialization import dump
@@ -36,6 +43,10 @@ from backend.sync_stock_master import Stock
 ROOT = Path(__file__).resolve().parents[1]
 DATASET = ROOT / "data/eval/ragas_benchmark_20.json"
 AS_OF = date(2026, 4, 30)
+# After the 15:40 KRX confirmation, so the card's session is AS_OF and its DART window ends there.
+CARD_CLOCK = datetime(2026, 4, 30, 18, tzinfo=KST)
+TAGGED = re.compile(r"\s*\[(?:DOC|NEWS|P)-[0-9]+\]")
+FALLBACK_WARNING = "답변 모델을 사용할 수 없어"
 EVENT_TYPES = ("bond_issue", "rights_issue", "control_change", "supply_contract", "preliminary_earnings")
 TARGETS = {"faithfulness": 0.90, "context_precision": 0.85, "numeric_error_pct": 0.0}
 METRIC_LABELS = {
@@ -112,11 +123,22 @@ def scenario(case):
     async def orderable_cash(_holding):
         return cash
 
-    async def get_news(_name):
-        return []
+    async def value(result=None):
+        return result
 
-    market = SimpleNamespace(collect=collect, orderable_cash=orderable_cash,
-                             external=SimpleNamespace(get_news=get_news))
+    # What price_card.get_or_build_card reads: quote, bars, flow and balance, an empty cache,
+    # ETL that reports indexed chunks (dart_rag.search serves them) and no news.
+    broker = SimpleNamespace(
+        clock=lambda: CARD_CLOCK,
+        get_quote=lambda *_, **__: value(Quote(code, price, "eval", AS_OF, Decimal(0))),
+        get_daily_bars=lambda *_, **__: value(bars),
+        get_five_day_flow=lambda *_, **__: value(flow),
+        get_balance=lambda: value(balance),
+        redis=SimpleNamespace(get=lambda _key: value(), set=lambda *_, **__: value()),
+    )
+    etl = SimpleNamespace(ingest_missing_stock=lambda *_: value(), has_recent_chunks=lambda *_: value(True))
+    market = SimpleNamespace(collect=collect, orderable_cash=orderable_cash, broker=broker, etl=etl,
+                             external=SimpleNamespace(get_news=lambda *_, **__: value([])))
     card = calculate_scorecard(stock, holding, flow, as_of=AS_OF, reports=reports, bars=bars,
                                releases=releases, overhang_events=events)
     purchase = simulate_purchase(holding, balance, cash, amount=budget)
@@ -128,7 +150,7 @@ def scenario(case):
         "scorecard": Decimal(card["total"]),
     }
     query = f"{case['question']} {code} 종목을 {budget:f}원 추매하면 예상 평단가는 얼마인가요?"
-    return build_graph(market), query, expected
+    return build_graph(market), query, expected, stock
 
 
 NUMBER = r"([+-]?(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?)"
@@ -145,41 +167,65 @@ def grade_numbers(report, name, expected):
     answer, _, evidence = report.partition(f"\n{stock_analysis.EVIDENCE_HEADING}\n")
     holding = "\n".join(line for line in evidence.splitlines() if line.startswith(f"- {name} · "))
     simulations = re.findall(r"^- 매수 시뮬레이션 · ", evidence, re.MULTILINE)
-    # The evidence line omits the stock, so the answer must attribute the simulation to it.
-    simulated_name = re.findall(r"\*\*(.+?)\*\* 현재가에 [0-9,]+주 체결을 가정하면", answer)
+    # The local report names the stock in its answer text; the answer report in its evidence line.
+    simulated_name = set(re.findall(r"\*\*(.+?)\*\* 현재가에 [0-9,]+주 체결을 가정하면", answer))
+    simulated_name |= set(re.findall(r"^- 매수 시뮬레이션 · ([^·\n]+?) · 투자 금액", evidence, re.MULTILINE))
     checks = {}
     for field, target in expected.items():
         is_simulation = field == "simulated_average_price"
         text = evidence if is_simulation else holding
         matches = [Decimal(value.replace(",", ""))
                    for value in re.findall(NUMERIC_PATTERNS[field], text, re.MULTILINE)]
-        correct_scope = len(simulations) == 1 and simulated_name == [name] if is_simulation else True
+        correct_scope = len(simulations) == 1 and simulated_name == {name} if is_simulation else True
         checks[field] = {"expected": format(target, "f"), "observed": [format(v, "f") for v in matches],
                          "passed": matches == [target] and correct_scope}
     return checks
 
 
+def disclosure_docs(context):
+    """The DOC chunks (with text) the answer model received, in the order it received them."""
+    return [doc for card in context.get("cards", []) for doc in card["docs"] if doc.get("text")]
+
+
+def dry_answer(case, context):
+    """An extractive answer: each relevant chunk the context carries, cited by its [DOC-n] tag."""
+    relevant = {doc["text"] for doc in case["documents"] if doc["relevant"]}
+    cited = [doc for doc in disclosure_docs(context) if doc["text"] in relevant]
+    core = " ".join(f"{doc['text'].rstrip('.')} [{doc['id']}]." for doc in cited)
+    tags = list(dict.fromkeys(doc["id"] for doc in cited))
+    evidence = "\n".join(f"- [{tag}] 공시 발췌" for tag in tags)
+    return stock_analysis.Analysis(
+        analysis_text=f"{stock_analysis.ANSWER_HEADING}\n\n{core}\n\n{stock_analysis.EVIDENCE_HEADING}\n\n{evidence}",
+        citations=tags)
+
+
+def core_answer(report):
+    """The report's core answer section without citation tags, the text Faithfulness judges."""
+    answer = report.partition(f"\n{stock_analysis.EVIDENCE_HEADING}\n")[0]
+    return TAGGED.sub("", answer.removeprefix(stock_analysis.ANSWER_HEADING)).strip()
+
+
 async def run_case(case, *, dry_run):
-    graph, query, expected = scenario(case)
-    production_analyze = stock_analysis.analyze
+    """Stream one case through the production graph; return (answer context, core answer, checks, fallback)."""
+    graph, query, expected, stock = scenario(case)
+    production_invoke = llm.invoke
     context = {}
 
-    async def capture(prompt):
-        context.update(json.loads(prompt))
-        if not dry_run:
-            return await production_analyze(prompt)
-        relevant = {doc["text"] for doc in case["documents"] if doc["relevant"]}
-        matched = [doc for doc in context["disclosures"] if doc["text"] in relevant]
-        return {"analysis_text": " ".join(
-            f"{doc['text'].rstrip('.')} [{doc['source']}]." for doc in matched),
-            "citations": list(dict.fromkeys(doc["source"] for doc in matched))}
+    async def invoke(role, instruction, prompt, schema, **kwargs):
+        if role == "answer":
+            context.clear()
+            context.update(json.loads(prompt))
+            if dry_run:
+                return dry_answer(case, context)
+            return await production_invoke(role, instruction, prompt, schema, **kwargs)
+        # The analyst is blocked in both modes: cards are local, so only the answer model varies.
+        raise llm.LLMUnavailable("Evaluation keeps price cards local", reason="평가용 로컬 카드")
 
     tokens = []
     done = None
-    # Exercise local fallback without using any configured cloud credentials in a dry run.
-    offline = patch.object(llm, "invoke", AsyncMock(side_effect=llm.LLMUnavailable(
-        "Offline evaluation blocks cloud LLM calls", reason="오프라인 평가"))) if dry_run else nullcontext()
-    with offline, patch.object(stock_analysis, "analyze", capture):
+    with (patch.object(llm, "invoke", invoke),
+          patch.object(price_card, "fetch_stocks", AsyncMock(return_value={stock.stock_code: stock})),
+          patch.object(price_card, "record_card", AsyncMock())):
         async for frame in chat_events(graph, query):
             event, data, *_ = frame.splitlines()
             payload = json.loads(data.removeprefix("data: "))
@@ -192,31 +238,35 @@ async def run_case(case, *, dry_run):
     report = done["final_report"]
     if "".join(tokens) != report:
         raise RuntimeError(f"{case['id']}: token stream differs from final report")
-    answer = " ".join(row["analysis_text"] for row in done["verified_stock_results"])
-    answer = re.sub(r"\s*\[[0-9]{14}\]", "", answer)
-    return context, answer, grade_numbers(report, case["issuer"], expected)
+    fallback = any(warning.startswith(FALLBACK_WARNING) for warning in done["guardrail_warnings"])
+    if fallback and dry_run:
+        raise RuntimeError(f"{case['id']}: the dry answer did not pass the answer verifier")
+    # A failed answer model leaves the local report; there is no model answer to judge.
+    answer = "" if fallback else core_answer(report)
+    return context, answer, grade_numbers(report, case["issuer"], expected), fallback
 
 
 async def dry_retrieval(case):
     rows = [{"rcept_no": doc["rcept_no"], "report_nm": doc["title"], "chunk_text": doc["text"]}
             for doc in case["documents"]]
 
-    async def search(corp_code, _query):
+    async def search(corp_code, _query, *, limit=5, since=None, until=None, **_):
         if corp_code != case["corp_code"]:
             raise ValueError("Unexpected issuer")
-        return rows
+        # The fixed rank keeps dataset order; the card's DART window applies as in production.
+        return [row for row in rows
+                if (since or date.min) <= date.fromisoformat(row["rcept_no"][:8]) <= (until or date.max)][:limit]
 
     with patch.object(dart_rag, "search", search):
-        context, answer, checks = await run_case(case, dry_run=True)
-    return context, answer, checks
+        return await run_case(case, dry_run=True)
 
 
 def dry_scores(case, context, answer):
-    retrieved = [doc["text"] for doc in context["disclosures"]]
+    retrieved = [doc["text"] for doc in disclosure_docs(context)]
     relevant = {doc["text"] for doc in case["documents"] if doc["relevant"]}
     hits = [index for index, text in enumerate(retrieved, 1) if text in relevant]
     precision = sum(count / rank for count, rank in enumerate(hits, 1)) / len(hits) if hits else 0.0
-    # The dry worker produces extractive claims. This check is deterministic and independent of a judge.
+    # The dry answer is extractive. This check is deterministic and independent of a judge.
     claims = re.split(r"(?<=\.)\s+", answer) if answer else []
     faithful = sum(claim in retrieved for claim in claims) / len(claims) if claims else 0.0
     return faithful, precision
@@ -256,11 +306,12 @@ async def indexed_corpus(cases):
 
 async def evaluate(dataset, *, dry_run, judge_model):
     results = []
+    models = {"answer_model": llm.model_name("answer"), "judge_model": judge_model}
     if dry_run:
         for case in dataset["cases"]:
-            context, answer, checks = await dry_retrieval(case)
-            results.append(case_result(case, *dry_scores(case, context, answer), checks))
-        return summarize(dataset, results, "dry-run")
+            context, answer, checks, fallback = await dry_retrieval(case)
+            results.append(case_result(case, *dry_scores(case, context, answer), checks, fallback))
+        return {**summarize(dataset, results, "dry-run"), **models}
 
     from ragas.dataset_schema import SingleTurnSample
     from ragas.llms import LangchainLLMWrapper
@@ -271,36 +322,38 @@ async def evaluate(dataset, *, dry_run, judge_model):
     precision = LLMContextPrecisionWithReference(llm=judge)
     async with indexed_corpus(dataset["cases"]):
         for case in dataset["cases"]:
-            context, answer, checks = await run_case(case, dry_run=False)
-            disclosures = [f"{doc['title']}\n{doc['text']}" for doc in context["disclosures"]]
-            indicators = {k: v for k, v in context.items() if k != "disclosures"}
+            context, answer, checks, fallback = await run_case(case, dry_run=False)
+            disclosures = [f"{doc['title']}\n{doc['text']}" for doc in disclosure_docs(context)]
+            # The rest of the answer context (account, levels, facts, simulation) also grounds claims.
+            indicators = {**context, "cards": [{key: value for key, value in card.items() if key != "docs"}
+                                               for card in context.get("cards", [])]}
             sample = SingleTurnSample(user_input=case["question"], response=answer, reference=case["reference"],
                                       retrieved_contexts=disclosures)
             f = await faithful.single_turn_ascore(sample.model_copy(update={
                 "retrieved_contexts": [*disclosures, dump(indicators)]})) if answer else 0.0
             p = await precision.single_turn_ascore(sample) if disclosures else 0.0
-            results.append(case_result(case, f, p, checks))
-    return {**summarize(dataset, results, "live"), "judge_model": judge_model,
-            "primary_worker_model": llm.model_name("answer")}
+            results.append(case_result(case, f, p, checks, fallback))
+    return {**summarize(dataset, results, "live"), **models}
 
 
-def case_result(case, faithfulness, precision, checks):
+def case_result(case, faithfulness, precision, checks, answer_fallback=False):
     if not all(math.isfinite(x) and 0 <= x <= 1 for x in (faithfulness, precision)):
         raise ValueError(f"{case['id']}: judge returned an invalid score")
     return {"id": case["id"], "type": case["type"], "faithfulness": faithfulness,
-            "context_precision": precision, "numeric_checks": checks}
+            "context_precision": precision, "numeric_checks": checks, "answer_fallback": answer_fallback}
 
 
 def summarize(dataset, results, mode):
     checks = [check for case in results for check in case["numeric_checks"].values()]
     failures = sum(not check["passed"] for check in checks)
+    fallbacks = sum(case["answer_fallback"] for case in results)
     metrics = {key: sum(case[key] for case in results) / len(results)
                for key in ("faithfulness", "context_precision")}
     metrics["numeric_error_pct"] = float(Decimal(failures) * 100 / len(checks))
     passed = all(metrics[key] >= TARGETS[key] for key in ("faithfulness", "context_precision"))
     return {"mode": mode, "dataset_source": dataset["source"], "case_count": len(results), "metrics": metrics,
             "targets": TARGETS, "numeric_checks": len(checks), "numeric_failures": failures,
-            "passed": passed and failures == 0, "cases": results}
+            "answer_failures": fallbacks, "passed": passed and failures == 0 and fallbacks == 0, "cases": results}
 
 
 def markdown(report):
@@ -309,22 +362,28 @@ def markdown(report):
     for key, target in TARGETS.items():
         operator = "=" if key == "numeric_error_pct" else "≥"
         lines.append(f"| {METRIC_LABELS[key]} | {report['metrics'][key]:.4f} | {operator} {target:.2f} |")
-    lines.extend(["", f"정형 수치 검사 {report['numeric_checks']}건 중 오류 {report['numeric_failures']}건"])
+    lines.extend(["", f"정형 수치 검사 {report['numeric_checks']}건 중 오류 {report['numeric_failures']}건",
+                  f"답변 모델 실패(로컬 리포트 대체) {report['answer_failures']}건"])
+    if "answer_model" in report:
+        lines.append(f"답변 모델 {report['answer_model']} · Judge {report['judge_model']}")
     return "\n".join(lines)
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, default=DATASET)
     parser.add_argument("--dry-run", action="store_true", help="Use offline fixture retrieval and scoring")
+    parser.add_argument("--answer-model", help="ANSWER_MODEL for this run only, e.g. qwen3.8-flash or gemini-3.8-flash")
     parser.add_argument("--judge-model", default=llm.model_name("judge"))
     parser.add_argument("--format", choices=("json", "markdown"), default="json")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if not args.dry_run and not os.getenv("GEMINI_API_KEY", "").strip():
         parser.error("GEMINI_API_KEY is required for live evaluation")
     policy = asyncio.SelectorEventLoop if sys.platform == "win32" else None
+    # patch.dict restores ANSWER_MODEL (or its absence) when the run ends.
+    override = patch.dict(os.environ, {"ANSWER_MODEL": args.answer_model}) if args.answer_model else nullcontext()
     try:
-        with asyncio.Runner(loop_factory=policy) as runner:
+        with override, asyncio.Runner(loop_factory=policy) as runner:
             report = runner.run(evaluate(load_dataset(args.dataset), dry_run=args.dry_run, judge_model=args.judge_model))
     except ImportError as exc:
         parser.exit(2, f"Evaluation dependency is missing: {exc.name}. See scripts/requirements-eval.txt.\n")

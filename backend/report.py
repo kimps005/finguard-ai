@@ -61,15 +61,58 @@ def card_line(band):
             f"2주 상단 {won(levels['peak_limit']['price'])}")
 
 
-def simulation_line(simulation):
-    return (f"매수 시뮬레이션 · 투자 금액 {won(simulation['invested_amount'])}, "
+def simulation_line(simulation, name=None):
+    """The simulation evidence; `name` attributes it when the answer text may not name the stock."""
+    stock = f"{name} · " if name else ""
+    return (f"매수 시뮬레이션 · {stock}투자 금액 {won(simulation['invested_amount'])}, "
             f"매수 수량 {simulation['buy_quantity']:,}주, 예상 평단가 {won(simulation['average_price'])}")
 
 
+def moving_average_20(inputs):
+    if inputs is None or len(inputs.bars) < 20:
+        return None
+    return sum((bar.close for bar in inputs.bars[-20:]), Decimal(0)) / 20
+
+
+def price_line(holding, ma20):
+    line = f"{holding['name']} · 현재가 {won(holding['current_price'])}, 평단가 {won(holding['average_price'])}"
+    return line if ma20 is None else f"{line}, 20일선 {won(ma20)}"
+
+
+def dilution_line(name, dilution):
+    return f"{name} · 오버행 희석률 {dilution:f}%"
+
+
+def score_line(name, card):
+    scores = card["scores"]
+    return (f"{name} · 수급 {scores['flow']}, 모멘텀 {scores['momentum']}, "
+            f"실적 {scores['earnings']}, 오버행 {scores['overhang']}점 (합계 {card['total']}/100)")
+
+
+def holding_evidence(state, code):
+    """Local price, overhang and score lines for one held target; none for a stock the account lacks."""
+    holding = next((h for h in state["holdings"] if h["stock_code"] == code), None)
+    if holding is None:
+        return []
+    name = holding["name"]
+    card = state.get("quant_scorecards", {}).get(code, {})
+    lines = [price_line(holding, moving_average_20(state.get("score_inputs", {}).get(code)))]
+    if card.get("dilution_pct") is not None:
+        lines.append(dilution_line(name, card["dilution_pct"]))
+    if card.get("total") is not None:
+        lines.append(score_line(name, card))
+    return lines
+
+
 def answer_report(state, core, sources):
-    """The answer model's verified core answer; the evidence is local: cards, simulation and cited sources."""
+    """The answer model's verified core answer; the evidence is local: simulation, holdings, cards, sources."""
     simulation = state["simulation_result"] or {}
-    evidence = [simulation_line(simulation)] if simulation and "message" not in simulation else []
+    evidence = []
+    if simulation and "message" not in simulation:
+        name = next((h["name"] for h in state["holdings"] if h["stock_code"] == simulation["stock_code"]), None)
+        evidence.append(simulation_line(simulation, name))
+    for code in dict.fromkeys(row["stock_code"] for row in state["verified_stock_results"]):
+        evidence += holding_evidence(state, code)
     evidence += [card_line(row["card"]) for row in state["verified_stock_results"] if row.get("card")]
     evidence += [source_line(*source) for source in sources]
     grounds = "\n".join(f"- {item}" for item in evidence) or "- 가격 카드 없음"
@@ -126,8 +169,7 @@ def diagnosis_report(state, summary="", disclosures=()):
         answer.append(f"**{simulated_name}** 현재가에 {simulation['buy_quantity']:,}주 체결을 가정하면 예상 평단가는 "
                       f"{won(average)}이고, 남는 주문 가능 현금은 {won(simulation['remaining_cash'])}입니다."
                       + (f" 예상 비중은 {weight:.2%}입니다." if weight is not None else ""))
-        evidence.append(f"매수 시뮬레이션 · 투자 금액 {won(simulation['invested_amount'])}, "
-                        f"매수 수량 {simulation['buy_quantity']:,}주, 예상 평단가 {won(average)}")
+        evidence.append(simulation_line(simulation))
 
     rows = {row["stock_code"]: row for row in state["stock_analysis_results"]}
     # Report links get their own namespace, numbered in the order the report cites them.
@@ -137,17 +179,14 @@ def diagnosis_report(state, summary="", disclosures=()):
         price, average = won(h["current_price"]), won(h["average_price"])
         card = state["quant_scorecards"].get(code, {})
         inputs = state["score_inputs"].get(code)
-        prices = f"{name} · 현재가 {price}, 평단가 {average}"
-        has_ma20 = inputs is not None and len(inputs.bars) >= 20
-        ma20 = None
+        ma20 = moving_average_20(inputs)
+        has_ma20 = ma20 is not None
         if has_ma20:
-            ma20 = sum((bar.close for bar in inputs.bars[-20:]), Decimal(0)) / 20
             current = h["current_price"]
             relation = "위" if current > ma20 else "아래" if current < ma20 else "수준"
             scenario = (f"**{name}** 현재가 {price}는 20일선({won(ma20)}) {relation}입니다. "
                         "20일선 위에서 순매수가 이어지면 반등 여지가 있고, "
                         "20일선 아래에서 순매도가 이어지면 추가 하락 위험이 커집니다.")
-            prices += f", 20일선 {won(ma20)}"
         else:
             scenario = f"**{name}** 현재가 {price}이며 20일선 자료가 부족해 추세를 판단하기 어렵습니다."
         scenario += f" 평단가는 {average}입니다."
@@ -157,7 +196,7 @@ def diagnosis_report(state, summary="", disclosures=()):
             scenario += " 평단가 회복 여부는 손익을 비교할 기준이며, 목표 매도가 범위를 산정할 자료는 부족합니다."
         if re.search(r"물타|추매|추가\s*매수", query):
             scenario += " 현재가가 평단가보다 낮을 때 추가 체결은 평단가를 낮추고 보유 수량을 늘립니다."
-        evidence.append(prices)
+        evidence.append(price_line(h, ma20))
         if inputs:
             flow = inputs.flow
             scenario += (f" 최근 5거래일 순매수는 외국인 {flow.foreign_net_buy:,}주, "
@@ -171,7 +210,7 @@ def diagnosis_report(state, summary="", disclosures=()):
         dilution, total = card.get("dilution_pct"), card.get("total")
         if dilution is not None:
             scenario += f" 오버행 희석률은 {dilution:f}%입니다."
-            evidence.append(f"{name} · 오버행 희석률 {dilution:f}%")
+            evidence.append(dilution_line(name, dilution))
             if dilution > 0:
                 scenario += " 해당 물량이 실제로 출회되면 매물 부담이 커질 수 있습니다."
             if dilution > 0 and not summary and inputs:
@@ -191,9 +230,7 @@ def diagnosis_report(state, summary="", disclosures=()):
                             report_alias, titles.get(alias, "오버행 공시"), receipt))
         if total is not None:
             scenario += f" 수급·모멘텀·실적·오버행을 합산한 점수는 {total}/100입니다."
-            scores = card["scores"]
-            evidence.append(f"{name} · 수급 {scores['flow']}, 모멘텀 {scores['momentum']}, "
-                            f"실적 {scores['earnings']}, 오버행 {scores['overhang']}점 (합계 {total}/100)")
+            evidence.append(score_line(name, card))
         if simulation.get("stock_code") == code:
             answer[0] += " " + scenario
         else:

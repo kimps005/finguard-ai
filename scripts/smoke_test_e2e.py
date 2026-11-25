@@ -3,8 +3,9 @@
 import argparse
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
+import json
 import os
 from pathlib import Path
 import secrets
@@ -20,9 +21,10 @@ import uvicorn
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from backend import dart_rag, llm, stock_analysis
-from backend.broker import Balance, FiveDayFlow, Holding, InvestorFlow
+from backend import dart_rag, llm, price_card, stock_analysis
+from backend.broker import Balance, FiveDayFlow, Holding, InvestorFlow, Quote
 from backend.main import app
+from backend.market_time import KST
 from backend.portfolio_graph import build_graph
 from backend.portfolio_market import ScoreInputs
 from backend.sync_stock_master import Stock
@@ -36,6 +38,7 @@ RECEIPT = "20260115000001"
 STOCK = Stock("000001", "00000001", None, None, "스모크 테스트 종목", "STOCK", "26", Decimal(10000))
 DISCLOSURE = "모의 공시에 전환사채 발행이 기재됐습니다"
 QUERIES = {"fast_lookup": FAST_QUERY, "deep_diagnosis": DEEP_QUERY}
+CARD_CLOCK = datetime(2026, 1, 15, 18, tzinfo=KST)
 
 
 def verify_gpu():
@@ -75,12 +78,32 @@ def fixture_graph(first_status_received):
     async def collect():
         return await get_balance(), as_of, None, {STOCK.stock_code: inputs}, []
 
+    # The price-card builder runs for real: fixed quote, no bars or flow, an empty cache, and ETL
+    # that reports indexed chunks so dart_rag.search (patched) supplies the mock disclosure.
+    broker = SimpleNamespace(
+        get_balance=get_balance, http=None, clock=lambda: CARD_CLOCK,
+        get_quote=AsyncMock(return_value=Quote(STOCK.stock_code, Decimal(100), "smoke", as_of)),
+        get_daily_bars=AsyncMock(return_value=()), get_five_day_flow=AsyncMock(return_value=None),
+        redis=SimpleNamespace(get=AsyncMock(return_value=None), set=AsyncMock()),
+    )
     market = SimpleNamespace(
-        broker=SimpleNamespace(get_balance=get_balance, http=None),
+        broker=broker,
+        etl=SimpleNamespace(ingest_missing_stock=AsyncMock(), has_recent_chunks=AsyncMock(return_value=True)),
         external=SimpleNamespace(get_news=AsyncMock(return_value=[])),
         collect=collect,
     )
     return build_graph(market)
+
+
+async def offline_invoke(role, instruction, context, schema, **kwargs):
+    """No cloud LLM: the analyst is unavailable and the answer quotes the card's [DOC-n] chunk."""
+    if role != "answer":
+        raise llm.LLMUnavailable("Smoke test blocks cloud LLM calls", reason="오프라인 스모크 테스트")
+    docs = [doc for card in json.loads(context)["cards"] for doc in card["docs"] if doc.get("text")]
+    core = " ".join(f"{doc['text']} [{doc['id']}]." for doc in docs)
+    return schema(analysis_text=f"{stock_analysis.ANSWER_HEADING}\n\n{core}\n\n"
+                                f"{stock_analysis.EVIDENCE_HEADING}\n\n- 모의 공시",
+                  citations=list(dict.fromkeys(doc["id"] for doc in docs)))
 
 
 async def wait_ready(client, url, *, exited):
@@ -103,13 +126,12 @@ async def run_backend(client, first_status_received):
             yield
 
     rows = [{"rcept_no": RECEIPT, "report_nm": "모의 전환사채 발행결정", "chunk_text": DISCLOSURE}]
-    answer = {"analysis_text": f"{DISCLOSURE} [DOC-1].", "citations": ["DOC-1"]}
     with (
         patch.object(app.router, "lifespan_context", fixture_lifespan),
         patch.object(dart_rag, "search", AsyncMock(return_value=rows)),
-        patch.object(llm, "invoke", AsyncMock(side_effect=llm.LLMUnavailable(
-            "Smoke test blocks cloud LLM calls", reason="오프라인 스모크 테스트"))),
-        patch.object(stock_analysis, "analyze", AsyncMock(return_value=answer)),
+        patch.object(llm, "invoke", offline_invoke),
+        patch.object(price_card, "fetch_stocks", AsyncMock(return_value={STOCK.stock_code: STOCK})),
+        patch.object(price_card, "record_card", AsyncMock()),
         socket.socket() as listener,
     ):
         listener.bind((LOOPBACK, 0))
@@ -178,8 +200,10 @@ async def verify_stream(client, url, intent, first_status_received, headers=None
     if done["account_summary"]["cash_deposit"] != "1600":
         raise RuntimeError("The report does not contain the mock account snapshot")
     verified = done["verified_stock_results"]
-    if intent == "deep_diagnosis" and (len(verified) != 1 or verified[0]["citations"] != [RECEIPT]
-                                       or DISCLOSURE not in done["final_report"]):
+    # The answer cites the card's DOC chunk; the local evidence links its DART receipt.
+    if intent == "deep_diagnosis" and (len(verified) != 1 or not verified[0]["card"]
+                                       or DISCLOSURE not in done["final_report"]
+                                       or f"rcpNo={RECEIPT}" not in done["final_report"]):
         raise RuntimeError("Deep diagnosis did not carry the verified mock disclosure")
 
 

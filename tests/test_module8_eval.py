@@ -10,7 +10,6 @@ from scripts import benchmark_latency as latency
 from scripts import eval_ragas as ragas
 
 
-@pytest.mark.xfail(reason="Task 8에서 답변 모델 평가로 교체", strict=True)
 def test_balanced_offline_evaluation_uses_the_graph_and_all_numeric_fields():
     dataset = ragas.load_dataset(ragas.DATASET)
     report = asyncio.run(ragas.evaluate(dataset, dry_run=True, judge_model="unused"))
@@ -28,6 +27,27 @@ def test_balanced_offline_evaluation_uses_the_graph_and_all_numeric_fields():
         "scorecard": {"expected": "60", "observed": ["60"], "passed": True},
     }
     assert "| Faithfulness | 1.0000 | ≥ 0.90 |" in ragas.markdown(report)
+    assert report["answer_failures"] == 0
+    assert report["answer_model"] == "qwen3.8-flash" and report["judge_model"] == "unused"
+
+
+def test_answer_model_flag_is_recorded(monkeypatch, capsys):
+    monkeypatch.setenv("ANSWER_MODEL", "qwen3.8-flash")
+    seen = []
+    production = ragas.evaluate
+
+    async def evaluate(*args, **kwargs):
+        seen.append(ragas.llm.model_name("answer"))
+        return await production(*args, **kwargs)
+
+    monkeypatch.setattr(ragas, "evaluate", evaluate)
+    assert ragas.main(["--dry-run", "--answer-model", "gemini-3.8-flash"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["answer_model"] == "gemini-3.8-flash" and seen == ["gemini-3.8-flash"]
+    assert report["judge_model"] == "gemini-3.8-flash"
+    assert report["passed"] is True and report["numeric_failures"] == 0
+    # The override lasts only for the run.
+    assert ragas.os.environ["ANSWER_MODEL"] == "qwen3.8-flash"
 
 
 @pytest.mark.parametrize("original,replacement,failed_field", [
@@ -38,6 +58,7 @@ def test_balanced_offline_evaluation_uses_the_graph_and_all_numeric_fields():
     ("(합계 60/100)", "(합계 60/100)\n- 가상 · 수급 0, 모멘텀 0, 실적 0, 오버행 0점 (합계 59/100)", "scorecard"),
     ("예상 평단가 10,073원\n", "예상 평단가 10,074원\n", "simulated_average_price"),
     ("**가상** 현재가에", "**다른종목** 현재가에", "simulated_average_price"),
+    ("- 매수 시뮬레이션 · 투자", "- 매수 시뮬레이션 · 다른종목 · 투자", "simulated_average_price"),
 ])
 def test_numeric_grading_counts_missing_wrong_and_duplicate_values(original, replacement, failed_field):
     # Values in the answer prose and in other holdings' lines must not count.
@@ -57,11 +78,26 @@ def test_numeric_grading_counts_missing_wrong_and_duplicate_values(original, rep
     assert summary["passed"] is False
 
 
+def test_simulation_attributed_by_the_answer_report_evidence_line():
+    # The answer model's prose need not name the simulated stock; the local evidence line does.
+    report = ("### 핵심 답변\n\n공시상 전환 물량이 있습니다.\n\n### 판단 근거\n\n"
+              "- 매수 시뮬레이션 · 가상 · 투자 금액 20,146원, 매수 수량 2주, 예상 평단가 10,073원\n"
+              "- 가상 · 현재가 12,253원, 평단가 9,637원, 20일선 12,153원\n"
+              "- 가상 · 오버행 희석률 3.25%\n"
+              "- 가상 · 수급 15, 모멘텀 15, 실적 25, 오버행 5점 (합계 60/100)")
+    expected = dict(zip(ragas.NUMERIC_PATTERNS, map(Decimal, ("3.25", "9637", "10073", "60")), strict=True))
+    assert all(check["passed"] for check in ragas.grade_numbers(report, "가상", expected).values())
+    prose = report.replace("공시상", "**다른종목** 현재가에 2주 체결을 가정하면 공시상")
+    assert not ragas.grade_numbers(prose, "가상", expected)["simulated_average_price"]["passed"]
+
+
 def test_dry_rank_and_grounding_penalize_misordered_context_and_unsupported_answer():
     case = {"documents": [{"text": "근거.", "relevant": True}]}
-    context = {"disclosures": [{"text": "무관."}, {"text": "근거."}]}
+    context = {"cards": [{"docs": [{"id": "DOC-1", "title": "무관", "text": "무관."},
+                                   {"id": "DOC-2", "title": "근거", "text": "근거."}]},
+                         {"docs": [{"id": "DOC-3", "title": "제목만"}]}]}
     assert ragas.dry_scores(case, context, "근거. 잘못된 주장.") == (0.5, 0.5)
-    assert ragas.dry_scores(case, {"disclosures": []}, "") == (0.0, 0.0)
+    assert ragas.dry_scores(case, {"cards": []}, "") == (0.0, 0.0)
 
 
 def test_dry_latency_exercises_http_request_and_split_sse_frames():

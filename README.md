@@ -555,9 +555,9 @@ OpenDART 공개 공시에서 5개 유형(전환사채·신주인수권부사채 
 | Context Precision | ≥ 0.85 | 1.0000 | `[측정 수치 기입 필요]` |
 | 정형 수치 오차율 | 0.0% | 0.0% (0/80) | `[측정 수치 기입 필요]` |
 
-- **dry-run**: 고정된 검색 순위와 발췌 답변으로 점수를 계산합니다. 실제 그래프, 인용 검증, SSE 토큰 재구성, 최종 Markdown 채점은 두 모드 모두에서 실행됩니다.
+- **dry-run**: 고정된 검색 순위와 발췌 답변으로 점수를 계산합니다. 실제 그래프, 가격 카드 빌더, 답변 검증, SSE 토큰 재구성, 최종 Markdown 채점은 두 모드 모두에서 실행됩니다. 분석가는 두 모드 모두 막아 카드를 로컬 카드로 고정하므로 비교 실행에서는 답변 모델만 달라집니다.
 - **수치 채점**: 오버행 희석률, 보유 평단가, 예상 평단가, 100점 스코어카드를 각각 `Decimal`로 대조합니다(20건 × 4항목 = 80). 예상 평단가는 화면과 같이 소수 둘째 자리로 반올림하고, 누락·중복·불일치는 각각 오류로 집계합니다.
-- **실측**: 연결한 PostgreSQL의 임시 스키마에 발췌 코퍼스를 색인하고 운영 코드의 임베딩·하이브리드 검색·리랭킹·답변 생성을 실행합니다. public 스키마에 pgvector가 활성화된 DB, 스키마 생성 권한, CUDA GPU, `GEMINI_API_KEY`가 필요합니다. Judge 모델은 기본적으로 `SYNTHESIZER_MODEL`이며 `--judge-model`로 바꿀 수 있습니다. [RAGAS Faithfulness](https://docs.ragas.io/en/v0.3.9/concepts/metrics/available_metrics/faithfulness/) · [RAGAS Context Precision](https://docs.ragas.io/en/v0.3.9/concepts/metrics/available_metrics/context_precision/)
+- **실측**: 연결한 PostgreSQL의 임시 스키마에 발췌 코퍼스를 색인하고 운영 코드의 임베딩·하이브리드 검색·리랭킹·답변 생성을 실행합니다. public 스키마에 pgvector가 활성화된 DB, 스키마 생성 권한, CUDA GPU, `GEMINI_API_KEY`가 필요합니다. Judge 모델은 기본적으로 `JUDGE_MODEL`(gemini-3.8-flash)이며 `--judge-model`로 바꿀 수 있습니다. `--answer-model`은 실행 동안만 `ANSWER_MODEL`을 바꾸고, 결과 JSON에 `answer_model`·`judge_model`을 기록합니다. [RAGAS Faithfulness](https://docs.ragas.io/en/v0.3.9/concepts/metrics/available_metrics/faithfulness/) · [RAGAS Context Precision](https://docs.ragas.io/en/v0.3.9/concepts/metrics/available_metrics/context_precision/)
 
 ```powershell
 .\.venv\Scripts\python.exe -X utf8 scripts/eval_ragas.py --dry-run --format markdown
@@ -569,6 +569,11 @@ OpenDART 공개 공시에서 5개 유형(전환사채·신주인수권부사채 
 
 ```powershell
 .\.venv\Scripts\python.exe -X utf8 scripts/eval_ragas.py --judge-model gemini-3.8-flash --format markdown
+```
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.eval_ragas --answer-model qwen3.8-flash
+.\.venv\Scripts\python.exe -m scripts.eval_ragas --answer-model gemini-3.8-flash
 ```
 
 ### 7.2 SSE 지연시간

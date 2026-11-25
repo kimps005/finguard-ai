@@ -51,6 +51,11 @@ def test_answer_and_local_fallback_use_the_same_report_format(monkeypatch):
         else:
             # The answer model's verified text is the answer; only its cited filing is linked.
             assert first_paragraph == "전환 물량이 출회되면 매물 부담이 커질 수 있습니다 [DOC-1]."
+            # The evidence repeats the local figures the local report would show, line for line.
+            evidence = report.split("### 판단 근거\n\n")[1].splitlines()
+            assert evidence[:3] == [f"- {holding.name} · 현재가 100원, 평단가 3,558원, 20일선 90원",
+                                    f"- {holding.name} · 오버행 희석률 0.1%",
+                                    f"- {holding.name} · 수급 25, 모멘텀 25, 실적 25, 오버행 15점 (합계 90/100)"]
         assert "[DOC-1]" in report and RECEIPT in report
         assert all(term not in report for term in (
             "DOC-2", unused_receipt, "미사용 공시", "기준금리", "종목 뉴스",
