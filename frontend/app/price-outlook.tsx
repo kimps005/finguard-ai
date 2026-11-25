@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { ExternalLink, RefreshCw, Search } from "lucide-react";
 import TossTenMinuteChart from "./toss-ten-minute-chart";
-import { ladderRows, sourceBadge } from "./price-card-rows";
+import { ladderRows, priceFacts, sourceBadge } from "./price-card-rows";
 import {
   SessionExpired, streamChat, type DecimalString, type StockPriceBand,
   type StockPriceBands, type StockSearchResult,
@@ -90,8 +90,9 @@ function PriceLadder({ band }: { band: StockPriceBand }) {
 }
 
 function Evidence({ band }: { band: StockPriceBand }) {
+  const facts = priceFacts(band);
   if (band.ma20 === null && !band.recent_range && !band.flow && band.disclosures.length === 0
-    && band.facts.length === 0 && band.news.length === 0) return null;
+    && facts.length === 0 && band.news.length === 0) return null;
   return (
     <section className="evidence" aria-labelledby="evidence-title">
       <h3 id="evidence-title">판단 근거</h3>
@@ -106,11 +107,11 @@ function Evidence({ band }: { band: StockPriceBand }) {
           <div><dt>기관 5일 순매수</dt><dd data-direction={direction(band.flow.institution)}>{won.format(band.flow.institution)}주</dd></div>
         </>}
       </dl>
-      {band.facts.length > 0 && (
+      {facts.length > 0 && (
         <dl className="evidence-facts" aria-label="차트 기준 가격">
-          {band.facts.map((fact) => (
+          {facts.map((fact) => (
             <div key={fact.id}>
-              <dt>{fact.label}{fact.session && <small>{fact.session}</small>}</dt>
+              <dt><span className="doc-alias">{fact.id}</span>{fact.label}{fact.session && <small>{fact.session}</small>}</dt>
               <dd>{won.format(fact.value)}원{fact.upper !== null && ` ~ ${won.format(fact.upper)}원`}</dd>
             </div>
           ))}

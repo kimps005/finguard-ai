@@ -24,3 +24,10 @@ export function ladderRows(band: StockPriceBand): LadderRow[] {
   ];
   return rows.sort((left, right) => Number(right.price) - Number(left.price));
 }
+
+/** Flow facts are share counts and already shown as 주 above, so the 원 price-fact list skips them. */
+const SHARE_FACT_LABELS = new Set(["외국인 5일 순매수", "기관 5일 순매수"]);
+
+export function priceFacts(band: StockPriceBand): StockPriceBand["facts"] {
+  return band.facts.filter((fact) => !SHARE_FACT_LABELS.has(fact.label));
+}

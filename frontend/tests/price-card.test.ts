@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ladderRows, sourceBadge } from "../app/price-card-rows.ts";
+import { ladderRows, priceFacts, sourceBadge } from "../app/price-card-rows.ts";
 import type { DecimalString, StockPriceBand } from "../lib/chat-stream.ts";
 
 type Source = "ai" | "local";
@@ -38,4 +38,15 @@ test("a local card shows the basic-calculation badge on every level", () => {
   const rows = ladderRows({ ...band(["local", "local", "local"]), ai_status: "local" });
   assert.deepEqual(rows.filter((row) => row.key !== "current").map((row) => sourceBadge(row.source!)),
     ["기본 계산", "기본 계산", "기본 계산"]);
+});
+
+test("price facts drop the share-count flow facts and keep their ids", () => {
+  const facts = [
+    { id: "P-1", label: "20일 이동평균", value: "69000" as DecimalString, upper: null, session: null },
+    { id: "P-2", label: "외국인 5일 순매수", value: "120000" as DecimalString, upper: null, session: null },
+    { id: "P-3", label: "기관 5일 순매수", value: "-5000" as DecimalString, upper: null, session: null },
+    { id: "P-4", label: "최근 저점", value: "66000" as DecimalString, upper: "66500" as DecimalString, session: "2026-11-20" },
+  ];
+  const rows = priceFacts({ ...band(), facts });
+  assert.deepEqual(rows.map((fact) => fact.id), ["P-1", "P-4"]);
 });
