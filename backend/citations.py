@@ -14,6 +14,19 @@ RECEIPT_PLACEHOLDER = "(공시번호 생략)"
 NUMBER = re.compile(r"(?:(?<![A-Za-z])(-)|(?<![0-9.,A-Za-z-]))"
                     r"([0-9][0-9,]*(?:\.[0-9]+)?)(?:\s?([천만억]))?(?:\s?(원|주|%))?(년)?")
 _PERIOD_SUFFIX = tuple("간일차봉선째")
+# A firm buy/sell order, as opposed to a "검토"/"고려" condition: imperative endings ("매수하세요",
+# "사세요", "팔아야 합니다") and emphasized verbs ("반드시 … 매수", "꼭 사세요"). "사라지다" is not "사라",
+# and "매수하라는 뜻은 아니다" quotes rather than gives an order.
+_ORDER_VERB = (r"(?:(?:매수|매도)\s*(?:하세요|하십시오|하시길|(?:해라|하라)(?![는고]))"
+               r"|사세요|파세요|사라(?![지져진졌질])|팔아라|(?:사야|팔아야)\s*(?:합니다|해요))")
+DEFINITIVE_ORDER = re.compile(
+    rf"(?:{_ORDER_VERB}|(?:반드시|무조건|지금\s*바로|당장|꼭)\s*.{{0,6}}?(?:{_ORDER_VERB}|매수|매도|사야|팔아야))"
+    r"(?![^.!?\n]{0,6}?(?:검토|고려))")
+
+
+def definitive_order(text: str) -> bool:
+    """True when `text` gives a firm buy/sell order rather than a condition to review."""
+    return bool(DEFINITIVE_ORDER.search(text))
 _MULTIPLIER = {"천": Decimal(1000), "만": Decimal(10000), "억": Decimal(10) ** 8}
 
 

@@ -274,3 +274,15 @@ def test_answer_outage_streams_local_report_and_done_ok(monkeypatch):
     done = stream(market, "홀드할까?", "005930")[-1][1]
     assert done["ok"] and "**종목005930**(미보유) 2주 가격 카드 기준 단기 저점은 95원" in done["final_report"]
     assert "- 종목005930 2주 가격 카드 · 현재가 100원, 단기 저점 95원" in done["final_report"]
+
+
+def test_imperative_orders_are_dropped_but_review_conditions_are_kept(monkeypatch):
+    band = card_fixture("000001", "종목000001")["band"]
+    capture_answer(monkeypatch, reply(
+        "[P-2] 20일선 95원을 지키는지 보는 조건입니다. 지금 매수하세요. 삼성전자를 매수하세요. 꼭 사세요. "
+        "반드시 확인 후 매수 검토 조건입니다. 당장 매도를 고려할 시점은 아닙니다.", ["P-2"]))
+    state = answer_state([band], holdings=[position()])
+    core, _, warnings = asyncio.run(stock_analysis.answer(state))
+    assert core == ("[P-2] 20일선 95원을 지키는지 보는 조건입니다. 반드시 확인 후 매수 검토 조건입니다. "
+                    "당장 매도를 고려할 시점은 아닙니다.")
+    assert "종합 진단 확정적 매수·매도 지시 문장 3개를 제외했습니다." in warnings

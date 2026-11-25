@@ -1,4 +1,6 @@
-from backend.citations import AliasBook, mask_receipts
+import pytest
+
+from backend.citations import AliasBook, definitive_order, mask_receipts
 
 
 def test_aliases_follow_first_seen_order_and_repeat_for_the_same_receipt():
@@ -17,3 +19,13 @@ def test_documents_mask_only_standalone_14_digit_receipts():
     assert document == {"source": "DOC-1", "title": "정정 (공시번호 생략) 보고",
                         "text": "번호 (공시번호 생략) 와 123456789012345 및 2026010100000"}
     assert mask_receipts("없음") == "없음"
+
+
+@pytest.mark.parametrize("text,order", [
+    ("지금 매수하세요.", True), ("삼성전자를 매수하세요.", True), ("꼭 사세요", True),
+    ("전량 팔아야 합니다.", True), ("당장 매도하십시오.", True),
+    ("반드시 확인 후 매수 검토", False), ("꼭 매수를 검토하세요.", False), ("당장 매도를 고려할 시점은 아닙니다.", False),
+    ("변동성이 사라지면 박스권입니다.", False), ("매수하라는 뜻은 아닙니다.", False),
+])
+def test_definitive_order_matches_imperatives_not_review_conditions(text, order):
+    assert definitive_order(text) is order

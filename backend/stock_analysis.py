@@ -9,7 +9,8 @@ from pydantic import BaseModel, StringConstraints, ValidationError
 
 from backend import dart_rag, llm
 from backend.citations import (
-    CITATION_MARK, RECEIPT, TAG, TAG_MARK, TagBook, figures, mask_receipts, unlisted_number, with_rounded,
+    CITATION_MARK, RECEIPT, TAG, TAG_MARK, TagBook, definitive_order, figures, mask_receipts, unlisted_number,
+    with_rounded,
 )
 from backend.serialization import dump
 
@@ -20,8 +21,6 @@ LEVEL_LABELS = {"buy_zone": "단기 저점(매수 검토)", "sell_zone": "단기
                 "peak_limit": "2주 상단(넘기 어려운 가격)"}
 SHARE_FACTS = ("외국인 5일 순매수", "기관 5일 순매수")
 WEB_LINK = re.compile(r"^https?://\S+$", re.IGNORECASE)
-# Spec failure condition: a firm buy/sell order, as opposed to a "검토" condition.
-DEFINITIVE_ORDER = re.compile(r"(반드시|무조건|지금\s*바로|당장)\s*.{0,6}(매수|매도|사세요|파세요|사라|팔아라|사야|팔아야)")
 ACCOUNT_LIKE = re.compile(r"[0-9]{10,}|[0-9]{8}-?[0-9]{2}")
 ACCOUNT_PLACEHOLDER = "(계좌번호 생략)"
 
@@ -244,7 +243,7 @@ def verify_results(raw, *, allowed):
                 missing = set(tags) - visible
                 receipt = RECEIPT.search(text)
                 number = not receipt and unlisted_number(text, allowed) is not None
-                order = bool(DEFINITIVE_ORDER.search(text))
+                order = definitive_order(text)
                 unknown.update(missing)
                 receipts = receipts or bool(receipt)
                 numbers += number

@@ -223,3 +223,17 @@ def test_literal_two_week_horizon_is_allowed():
     ok = validate_card(proposal(ceiling=("3290", ["P-4"], "2주 상단 매물대")), M, LOCAL)
     assert ok["levels"]["ceiling"]["source"] == "ai"
     assert validate_card(proposal(summary="12주 보유 중입니다."), M, LOCAL)["summary"] == ""
+
+
+@pytest.mark.parametrize("text", ["지금 매수하세요.", "삼성전자를 매수하세요.", "꼭 사세요."])
+def test_imperative_orders_are_rejected_in_card_text(text):
+    assert validate_card(proposal(summary=text), M, LOCAL)["summary"] == ""
+    assert validate_card(proposal(low=("2982", ["P-2"], text)), M, LOCAL)["levels"]["low"]["source"] == "local"
+    card = validate_card(proposal(risks=[Risk(text=text, basis=["P-2"])]), M, LOCAL)
+    assert card["risks"] == []
+
+
+def test_review_condition_is_not_an_order_in_card_text():
+    text = "반드시 확인 후 매수 검토 구간입니다."
+    assert validate_card(proposal(summary=text), M, LOCAL)["summary"] == text
+    assert validate_card(proposal(low=("2982", ["P-2"], text)), M, LOCAL)["levels"]["low"]["source"] == "ai"

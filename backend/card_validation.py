@@ -7,7 +7,7 @@ from decimal import Decimal
 from pydantic import BaseModel, Field
 
 from backend.chart_levels import Fact, round_to_tick
-from backend.citations import RECEIPT, TAG, unlisted_number, with_rounded as _with_rounded
+from backend.citations import RECEIPT, TAG, definitive_order, unlisted_number, with_rounded as _with_rounded
 from backend.stock_analysis import cited_sentences
 
 LEVELS = ("low", "high", "ceiling")
@@ -58,7 +58,7 @@ def _known_tags(m: Materials) -> set[str]:
 
 
 def _text_ok(text: str, m: Materials, allowed: set[Decimal]) -> bool:
-    if RECEIPT.search(text) or any(tag not in _known_tags(m) for tag in TAG.findall(text)):
+    if RECEIPT.search(text) or definitive_order(text) or any(tag not in _known_tags(m) for tag in TAG.findall(text)):
         return False
     return unlisted_number(text, allowed) is None
 
