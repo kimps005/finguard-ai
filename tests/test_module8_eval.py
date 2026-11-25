@@ -2,6 +2,7 @@ import asyncio
 from collections import Counter
 from decimal import Decimal
 import json
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -10,7 +11,14 @@ from scripts import benchmark_latency as latency
 from scripts import eval_ragas as ragas
 
 
-def test_balanced_offline_evaluation_uses_the_graph_and_all_numeric_fields():
+def clear_model_env(monkeypatch):
+    # The shell's model choice must not leak into the recorded models.
+    for name in ("ANSWER_MODEL", "JUDGE_MODEL", "FALLBACK_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_balanced_offline_evaluation_uses_the_graph_and_all_numeric_fields(monkeypatch):
+    clear_model_env(monkeypatch)
     dataset = ragas.load_dataset(ragas.DATASET)
     report = asyncio.run(ragas.evaluate(dataset, dry_run=True, judge_model="unused"))
     assert Counter(row["type"] for row in report["cases"]) == dict.fromkeys(ragas.EVENT_TYPES, 4)
@@ -32,6 +40,7 @@ def test_balanced_offline_evaluation_uses_the_graph_and_all_numeric_fields():
 
 
 def test_answer_model_flag_is_recorded(monkeypatch, capsys):
+    clear_model_env(monkeypatch)
     monkeypatch.setenv("ANSWER_MODEL", "qwen3.8-flash")
     seen = []
     production = ragas.evaluate
@@ -48,6 +57,46 @@ def test_answer_model_flag_is_recorded(monkeypatch, capsys):
     assert report["passed"] is True and report["numeric_failures"] == 0
     # The override lasts only for the run.
     assert ragas.os.environ["ANSWER_MODEL"] == "qwen3.8-flash"
+
+
+@pytest.mark.parametrize("argv", [[], ["--answer-model", "qwen3.8-flash"]])
+def test_live_qwen_comparison_requires_the_dashscope_key(monkeypatch, capsys, argv):
+    clear_model_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test")
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.setattr(ragas, "evaluate", pytest.fail)  # nothing may run
+    with pytest.raises(SystemExit) as exit_:
+        ragas.main(argv)
+    assert exit_.value.code == 2
+    assert "qwen3.8-flash 답변 모델을 쓰려면 DASHSCOPE_API_KEY가 필요합니다" in capsys.readouterr().err
+
+
+def test_gemini_answer_under_a_qwen_label_is_a_provider_fallback(monkeypatch):
+    clear_model_env(monkeypatch)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dash-test")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test")
+    case = ragas.load_dataset(ragas.DATASET)["cases"][0]
+    quota = httpx.HTTPStatusError("quota", request=httpx.Request("POST", "https://test"),
+                                  response=httpx.Response(429))
+    dashscope = AsyncMock(side_effect=quota)
+    # DashScope says 429, so llm.invoke answers with Gemini; no network call is made.
+    gemini = AsyncMock(side_effect=lambda role, model, messages, schema, **_: ragas.dry_answer(
+        case, json.loads(messages[1][1])))
+    monkeypatch.setattr(ragas.llm, "invoke_dashscope", dashscope)
+    monkeypatch.setattr(ragas.llm, "invoke_gemini", gemini)
+
+    async def run():
+        with ragas.fixed_retrieval(case):
+            return await ragas.run_case(case, dry_run=False)
+
+    context, answer, checks, fallback, provider_fallback = asyncio.run(run())
+    assert dashscope.await_count == 1 and gemini.await_args.args[:2] == ("answer", "gemini-3.8-flash")
+    assert answer and fallback is False and provider_fallback is True
+    summary = ragas.summarize({"source": "test"}, [ragas.case_result(
+        case, 1.0, 1.0, checks, fallback, provider_fallback)], "live")
+    assert summary["provider_fallbacks"] == 1 and summary["numeric_failures"] == 0
+    assert summary["passed"] is False
+    assert "대체 모델(Gemini) 응답 1건" in ragas.markdown(summary)
 
 
 @pytest.mark.parametrize("original,replacement,failed_field", [

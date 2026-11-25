@@ -9,7 +9,7 @@ comparison run (--answer-model) varies only the answer model.
 import argparse
 import asyncio
 from collections import Counter
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 import json
@@ -206,10 +206,19 @@ def core_answer(report):
 
 
 async def run_case(case, *, dry_run):
-    """Stream one case through the production graph; return (answer context, core answer, checks, fallback)."""
+    """Stream one case through the production graph.
+
+    Returns (answer context, core answer, checks, local-report fallback, provider fallback). The
+    provider fallback is True when a non-Gemini answer model was requested but llm.invoke answered
+    with Gemini (missing DashScope key, 429/403, timeout or 5xx), so the answer is not that model's.
+    """
     graph, query, expected, stock = scenario(case)
-    production_invoke = llm.invoke
-    context = {}
+    production_invoke, production_gemini = llm.invoke, llm.invoke_gemini
+    context, gemini_roles = {}, []
+
+    async def invoke_gemini(role, *args, **kwargs):
+        gemini_roles.append(role)
+        return await production_gemini(role, *args, **kwargs)
 
     async def invoke(role, instruction, prompt, schema, **kwargs):
         if role == "answer":
@@ -223,7 +232,7 @@ async def run_case(case, *, dry_run):
 
     tokens = []
     done = None
-    with (patch.object(llm, "invoke", invoke),
+    with (patch.object(llm, "invoke", invoke), patch.object(llm, "invoke_gemini", invoke_gemini),
           patch.object(price_card, "fetch_stocks", AsyncMock(return_value={stock.stock_code: stock})),
           patch.object(price_card, "record_card", AsyncMock())):
         async for frame in chat_events(graph, query):
@@ -243,10 +252,13 @@ async def run_case(case, *, dry_run):
         raise RuntimeError(f"{case['id']}: the dry answer did not pass the answer verifier")
     # A failed answer model leaves the local report; there is no model answer to judge.
     answer = "" if fallback else core_answer(report)
-    return context, answer, grade_numbers(report, case["issuer"], expected), fallback
+    provider_fallback = not llm.model_name("answer").startswith("gemini") and "answer" in gemini_roles
+    return context, answer, grade_numbers(report, case["issuer"], expected), fallback, provider_fallback
 
 
-async def dry_retrieval(case):
+@contextmanager
+def fixed_retrieval(case):
+    """Serve the case's chunks from dart_rag.search in dataset order (no database or GPU)."""
     rows = [{"rcept_no": doc["rcept_no"], "report_nm": doc["title"], "chunk_text": doc["text"]}
             for doc in case["documents"]]
 
@@ -258,6 +270,11 @@ async def dry_retrieval(case):
                 if (since or date.min) <= date.fromisoformat(row["rcept_no"][:8]) <= (until or date.max)][:limit]
 
     with patch.object(dart_rag, "search", search):
+        yield
+
+
+async def dry_retrieval(case):
+    with fixed_retrieval(case):
         return await run_case(case, dry_run=True)
 
 
@@ -309,8 +326,8 @@ async def evaluate(dataset, *, dry_run, judge_model):
     models = {"answer_model": llm.model_name("answer"), "judge_model": judge_model}
     if dry_run:
         for case in dataset["cases"]:
-            context, answer, checks, fallback = await dry_retrieval(case)
-            results.append(case_result(case, *dry_scores(case, context, answer), checks, fallback))
+            context, answer, checks, *fallbacks = await dry_retrieval(case)
+            results.append(case_result(case, *dry_scores(case, context, answer), checks, *fallbacks))
         return {**summarize(dataset, results, "dry-run"), **models}
 
     from ragas.dataset_schema import SingleTurnSample
@@ -322,7 +339,7 @@ async def evaluate(dataset, *, dry_run, judge_model):
     precision = LLMContextPrecisionWithReference(llm=judge)
     async with indexed_corpus(dataset["cases"]):
         for case in dataset["cases"]:
-            context, answer, checks, fallback = await run_case(case, dry_run=False)
+            context, answer, checks, *fallbacks = await run_case(case, dry_run=False)
             disclosures = [f"{doc['title']}\n{doc['text']}" for doc in disclosure_docs(context)]
             # The rest of the answer context (account, levels, facts, simulation) also grounds claims.
             indicators = {**context, "cards": [{key: value for key, value in card.items() if key != "docs"}
@@ -332,28 +349,32 @@ async def evaluate(dataset, *, dry_run, judge_model):
             f = await faithful.single_turn_ascore(sample.model_copy(update={
                 "retrieved_contexts": [*disclosures, dump(indicators)]})) if answer else 0.0
             p = await precision.single_turn_ascore(sample) if disclosures else 0.0
-            results.append(case_result(case, f, p, checks, fallback))
+            results.append(case_result(case, f, p, checks, *fallbacks))
     return {**summarize(dataset, results, "live"), **models}
 
 
-def case_result(case, faithfulness, precision, checks, answer_fallback=False):
+def case_result(case, faithfulness, precision, checks, answer_fallback=False, provider_fallback=False):
     if not all(math.isfinite(x) and 0 <= x <= 1 for x in (faithfulness, precision)):
         raise ValueError(f"{case['id']}: judge returned an invalid score")
     return {"id": case["id"], "type": case["type"], "faithfulness": faithfulness,
-            "context_precision": precision, "numeric_checks": checks, "answer_fallback": answer_fallback}
+            "context_precision": precision, "numeric_checks": checks, "answer_fallback": answer_fallback,
+            "provider_fallback": provider_fallback}
 
 
 def summarize(dataset, results, mode):
     checks = [check for case in results for check in case["numeric_checks"].values()]
     failures = sum(not check["passed"] for check in checks)
     fallbacks = sum(case["answer_fallback"] for case in results)
+    # A Gemini answer under a Qwen label would make the model comparison meaningless.
+    providers = sum(case["provider_fallback"] for case in results)
     metrics = {key: sum(case[key] for case in results) / len(results)
                for key in ("faithfulness", "context_precision")}
     metrics["numeric_error_pct"] = float(Decimal(failures) * 100 / len(checks))
     passed = all(metrics[key] >= TARGETS[key] for key in ("faithfulness", "context_precision"))
     return {"mode": mode, "dataset_source": dataset["source"], "case_count": len(results), "metrics": metrics,
             "targets": TARGETS, "numeric_checks": len(checks), "numeric_failures": failures,
-            "answer_failures": fallbacks, "passed": passed and failures == 0 and fallbacks == 0, "cases": results}
+            "answer_failures": fallbacks, "provider_fallbacks": providers,
+            "passed": passed and failures == 0 and fallbacks == 0 and providers == 0, "cases": results}
 
 
 def markdown(report):
@@ -363,7 +384,8 @@ def markdown(report):
         operator = "=" if key == "numeric_error_pct" else "≥"
         lines.append(f"| {METRIC_LABELS[key]} | {report['metrics'][key]:.4f} | {operator} {target:.2f} |")
     lines.extend(["", f"정형 수치 검사 {report['numeric_checks']}건 중 오류 {report['numeric_failures']}건",
-                  f"답변 모델 실패(로컬 리포트 대체) {report['answer_failures']}건"])
+                  f"답변 모델 실패(로컬 리포트 대체) {report['answer_failures']}건",
+                  f"대체 모델(Gemini) 응답 {report['provider_fallbacks']}건"])
     if "answer_model" in report:
         lines.append(f"답변 모델 {report['answer_model']} · Judge {report['judge_model']}")
     return "\n".join(lines)
@@ -379,6 +401,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if not args.dry_run and not os.getenv("GEMINI_API_KEY", "").strip():
         parser.error("GEMINI_API_KEY is required for live evaluation")
+    answer_model = args.answer_model or llm.model_name("answer")
+    if not args.dry_run and not answer_model.startswith("gemini") and not os.getenv("DASHSCOPE_API_KEY", "").strip():
+        parser.error(f"실측 평가에서 {answer_model} 답변 모델을 쓰려면 DASHSCOPE_API_KEY가 필요합니다. "
+                     "키가 없으면 Gemini 대체 응답이 이 모델의 결과로 기록됩니다.")
     policy = asyncio.SelectorEventLoop if sys.platform == "win32" else None
     # patch.dict restores ANSWER_MODEL (or its absence) when the run ends.
     override = patch.dict(os.environ, {"ANSWER_MODEL": args.answer_model}) if args.answer_model else nullcontext()
