@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import os
-import random
 import re
 import traceback
 from typing import Literal
@@ -18,10 +17,10 @@ from openai import APITimeoutError
 from pydantic import ValidationError
 
 
-Role = Literal["router", "worker", "synthesizer"]
-DEFAULTS = {"router": "qwen3.7-plus", "worker": "qwen3.8-flash", "synthesizer": "gemini-3.8-flash"}
+Role = Literal["analyst", "answer", "judge"]
+DEFAULTS = {"analyst": "qwen3.7-plus", "answer": "qwen3.8-flash",
+            "fallback": "gemini-3.8-flash", "judge": "gemini-3.8-flash"}
 BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-SYNTHESIZER_RETRY_DELAYS = (1.5, 3.0, 6.0)
 QWEN_THINKING_BUDGET = 2048
 logger = logging.getLogger(__name__)
 
@@ -34,7 +33,7 @@ class LLMUnavailable(Exception):
         self.reason = reason
 
 
-def model_name(role: Role) -> str:
+def model_name(role: Role | Literal["fallback"]) -> str:
     return os.getenv(f"{role.upper()}_MODEL", "").strip() or DEFAULTS[role]
 
 
@@ -42,7 +41,7 @@ def gemini(model=None, *, timeout=15):
     key = os.getenv("GEMINI_API_KEY", "").strip()
     if not key:
         raise LLMUnavailable("Gemini API key is missing", reason="API키 미설정")
-    return ChatGoogleGenerativeAI(google_api_key=key, model=model or model_name("synthesizer"),
+    return ChatGoogleGenerativeAI(google_api_key=key, model=model or model_name("fallback"),
                                   vertexai=False, temperature=0, timeout=timeout, max_retries=1)
 
 
@@ -97,10 +96,10 @@ def log_failure(role, model, exc):
                      role, model, failure_reason(exc), detail, exc_info=False)
 
 
-async def invoke_gemini(role, model, messages, schema):
-    client = await asyncio.to_thread(gemini, model, timeout=60 if role == "synthesizer" else 15)
+async def invoke_gemini(role, model, messages, schema, *, timeout=30):
+    client = await asyncio.to_thread(gemini, model, timeout=60 if role == "answer" else timeout)
     options = {}
-    if role == "synthesizer":
+    if role == "answer":
         options["safety_settings"] = {
             HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
         }
@@ -114,11 +113,11 @@ async def invoke_gemini(role, model, messages, schema):
     }:
         raise LLMUnavailable(f"Gemini response blocked (prompt={block}, finish={finish})", reason="응답 안전 필터")
     parsed = result["parsed"]
-    if parsed is not None and (role != "synthesizer" or parsed.analysis_text.strip()):
+    if parsed is not None and (role != "answer" or parsed.analysis_text.strip()):
         return parsed
 
     text = raw.text.strip()
-    if role == "synthesizer" and text.startswith("### "):
+    if role == "answer" and text.startswith("### "):
         # The report and its citations still pass through stock_analysis.synthesize.
         return schema.model_validate({"analysis_text": text, "citations": []})
     if not text or parsed is not None:
@@ -135,7 +134,7 @@ async def invoke_dashscope(model, key, messages, schema, *, timeout):
     if not key:
         raise LLMUnavailable("DashScope API key is missing", reason="API키 미설정")
     options = {}
-    if model in (DEFAULTS["router"], DEFAULTS["worker"]):
+    if model in (DEFAULTS["analyst"], DEFAULTS["answer"]):
         options["extra_body"] = {"thinking_budget": QWEN_THINKING_BUDGET}
     client = await asyncio.to_thread(
         ChatOpenAI, api_key=key, base_url=os.getenv("DASHSCOPE_BASE_URL", "").strip() or BASE_URL,
@@ -150,43 +149,36 @@ async def invoke_dashscope(model, key, messages, schema, *, timeout):
         raise LLMUnavailable("DashScope returned invalid structured output", reason="응답 형식 오류") from exc
 
 
-async def invoke(role: Role, instruction: str, context: str, schema):
+def timed_out(exc):
+    while exc is not None:
+        if isinstance(exc, (APITimeoutError, TimeoutException, TimeoutError)):
+            return True
+        exc = exc.__cause__
+    return False
+
+
+def fallback_error(exc):
+    status = http_status(exc)
+    return quota_error(exc) or timed_out(exc) or (status is not None and status >= 500)
+
+
+async def invoke(role: Role, instruction: str, context: str, schema, *, timeout: float = 30):
     """Use the same structured schema and sanitized messages on both providers."""
     messages = [("system", instruction), ("human", context)]
     key = os.getenv("DASHSCOPE_API_KEY", "").strip()
     model = model_name(role)
     try:
-        if role == "synthesizer":
-            for attempt in range(len(SYNTHESIZER_RETRY_DELAYS) + 1):
-                try:
-                    return await invoke_gemini(role, model, messages, schema)
-                except Exception as exc:
-                    if http_status(exc) not in (503, 504):
-                        raise
-                    log_failure(role, model, exc)
-                if attempt < len(SYNTHESIZER_RETRY_DELAYS):
-                    delay = SYNTHESIZER_RETRY_DELAYS[attempt]
-                    await asyncio.sleep(delay + random.uniform(0, delay * 0.25))
-            model = os.getenv("SYNTHESIZER_FALLBACK_MODEL", "").strip() or model_name("router")
-            return await invoke_dashscope(model, key, messages, schema, timeout=60)
-
-        if key:
+        if not model.startswith("gemini") and key:
             try:
-                if role == "worker":
-                    for _ in range(2):
-                        try:
-                            return await invoke_dashscope(model, key, messages, schema, timeout=45.0)
-                        except (APITimeoutError, TimeoutException) as exc:
-                            log_failure(role, model, exc)
-                    model = model_name("router")
-                    return await invoke_dashscope(model, key, messages, schema, timeout=45.0)
-                return await invoke_dashscope(model, key, messages, schema, timeout=15)
+                return await invoke_dashscope(model, key, messages, schema, timeout=timeout)
             except Exception as exc:
-                if not quota_error(exc):
+                if not fallback_error(exc):
                     raise
                 log_failure(role, model, exc)
-        model = model_name("synthesizer")
-        return await invoke_gemini(role, model, messages, schema)
+            model = model_name("fallback")
+        elif not model.startswith("gemini"):
+            model = model_name("fallback")
+        return await invoke_gemini(role, model, messages, schema, timeout=timeout)
     except Exception as exc:
         log_failure(role, model, exc)
         raise LLMUnavailable(f"{role} unavailable", reason=failure_reason(exc)) from exc

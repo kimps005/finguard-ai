@@ -8,8 +8,6 @@ import operator
 import re
 from typing import Annotated, Literal, TypedDict
 
-from pydantic import BaseModel
-
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, Send
@@ -43,10 +41,6 @@ class PortfolioState(Query, total=False):
     score_inputs: dict[str, ScoreInputs]
 
 
-class Intent(BaseModel):
-    intent_type: Literal["fast_lookup", "deep_diagnosis", "simulation"]
-
-
 async def router_node(state):
     query = re.sub(r"\s+", "", state["user_query"].lower())
     lookup = re.search(r"잔고|잔액|현금|예수금|현재가|주가|시세|평단|평가액|수익률|보유|비중|평가손익|fast_lookup", query)
@@ -59,17 +53,7 @@ async def router_node(state):
         intent = "fast_lookup"
     else:
         intent = "deep_diagnosis"
-    warnings = []
-    try:
-        # Preserve the fast path's first-token budget if the cloud classifier is slow.
-        async with asyncio.timeout(0.25 if intent == "fast_lookup" else None):
-            question = re.sub(r"\d[\d,./ -]*", "○", state["user_query"])
-            response = await llm.invoke("router", "사용자 요청을 분류하라. 단순 조회는 fast_lookup, "
-                                        "가정 매수는 simulation, 그 외 분석은 deep_diagnosis다.", question, Intent)
-            intent = response.intent_type
-    except (llm.LLMUnavailable, TimeoutError):
-        warnings.append("라우터 LLM 응답을 받지 못해 로컬 규칙으로 요청을 분류했습니다.")
-    return {"intent_type": intent, "verified_stock_results": [], "guardrail_warnings": warnings,
+    return {"intent_type": intent, "verified_stock_results": [], "guardrail_warnings": [],
             "quant_scorecards": {}, "macro_context": None, "simulation_result": None}
 
 

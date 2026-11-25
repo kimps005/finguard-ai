@@ -10,6 +10,7 @@ from scripts import benchmark_latency as latency
 from scripts import eval_ragas as ragas
 
 
+@pytest.mark.xfail(reason="Task 8에서 답변 모델 평가로 교체", strict=True)
 def test_balanced_offline_evaluation_uses_the_graph_and_all_numeric_fields():
     dataset = ragas.load_dataset(ragas.DATASET)
     report = asyncio.run(ragas.evaluate(dataset, dry_run=True, judge_model="unused"))

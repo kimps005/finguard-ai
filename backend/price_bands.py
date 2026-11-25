@@ -232,7 +232,7 @@ async def enrich_bands(rows):
 
     if contexts:
         answer = await optional_data(llm.invoke(
-            "synthesizer",
+            "analyst",
             "종목의 향후 1개월 가격 밴드에 붙일 한국어 근거를 작성하라. buy는 저점 지지, "
             "sell은 목표 고점에서 차익 실현, ceiling은 상단 저항을 판단하는 조건이다. "
             "가격은 로컬 엔진이 현재가·20일선·최근 변동폭으로 산출한다. "

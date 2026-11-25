@@ -281,7 +281,7 @@ async def evaluate(dataset, *, dry_run, judge_model):
             p = await precision.single_turn_ascore(sample) if disclosures else 0.0
             results.append(case_result(case, f, p, checks))
     return {**summarize(dataset, results, "live"), "judge_model": judge_model,
-            "primary_worker_model": llm.model_name("worker")}
+            "primary_worker_model": llm.model_name("answer")}
 
 
 def case_result(case, faithfulness, precision, checks):
@@ -317,7 +317,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, default=DATASET)
     parser.add_argument("--dry-run", action="store_true", help="Use offline fixture retrieval and scoring")
-    parser.add_argument("--judge-model", default=llm.model_name("synthesizer"))
+    parser.add_argument("--judge-model", default=llm.model_name("judge"))
     parser.add_argument("--format", choices=("json", "markdown"), default="json")
     args = parser.parse_args()
     if not args.dry_run and not os.getenv("GEMINI_API_KEY", "").strip():

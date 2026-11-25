@@ -18,7 +18,7 @@ from backend.broker import (
 from backend.connectors import ExternalConnectors
 from backend.dart_etl import DartETL
 from backend.main import app, chat_events
-from backend.portfolio_graph import Intent, build_graph, route_to_stock_workers
+from backend.portfolio_graph import build_graph, route_to_stock_workers
 from backend.portfolio_market import MarketData
 from backend.sync_stock_master import Stock
 
@@ -69,22 +69,14 @@ def setup_market(monkeypatch, positions):
     answer = {"analysis_text": "2026.11.21 기준 [DOC-1] 희석률은 3.5%입니다. "
                                "[DOC-99] 발행은 확정됐습니다. 수급은 안정적입니다.",
               "citations": ["DOC-1", "DOC-99"], "doc_map": {"DOC-99": RECEIPT}}
-    async def classify(messages):
-        question = messages[-1][1]
-        if "추매" in question:
-            return Intent(intent_type="simulation")
-        if "잔고" in question:
-            return Intent(intent_type="fast_lookup")
-        return Intent(intent_type="deep_diagnosis")
-
     monkeypatch.setenv("DASHSCOPE_API_KEY", "dash-test")
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-test")
-    router = AsyncMock(side_effect=classify)
+    # Most graph tests assert the answer prompt and reply on the Gemini mock.
+    monkeypatch.setenv("ANSWER_MODEL", "gemini-3.8-flash")
     worker = AsyncMock(return_value=stock_analysis.Analysis(**answer))
     summary = AsyncMock(return_value=gemini_result(stock_analysis.Analysis(analysis_text="종합 분석입니다.", citations=[])))
     dash = Mock()
-    dash.return_value.with_structured_output.side_effect = lambda schema, **_: Mock(
-        ainvoke=router if schema is Intent else worker)
+    dash.return_value.with_structured_output.return_value.ainvoke = worker
     google = Mock()
     google.return_value.with_structured_output.return_value.ainvoke = summary
     monkeypatch.setattr(llm, "ChatOpenAI", dash)
@@ -97,34 +89,35 @@ def parse_frame(frame):
     return event.removeprefix("event: "), json.loads(data.removeprefix("data: "))
 
 
-@pytest.mark.parametrize("role,model", [("router", "qwen3.7-plus"), ("worker", "qwen3.8-flash")])
+@pytest.mark.parametrize("role,model", [("analyst", "qwen3.7-plus"), ("answer", "qwen3.8-flash")])
 @pytest.mark.parametrize("status", [403, 429, 400])
 def test_dashscope_quota_falls_back_once_to_gemini(monkeypatch, role, model, status):
     from openai import APIStatusError
 
     monkeypatch.setenv("DASHSCOPE_API_KEY", "dash-key")
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
-    for key in ("ROUTER_MODEL", "WORKER_MODEL", "SYNTHESIZER_MODEL", "DASHSCOPE_BASE_URL"):
+    for key in ("ANALYST_MODEL", "ANSWER_MODEL", "FALLBACK_MODEL", "DASHSCOPE_BASE_URL"):
         monkeypatch.delenv(key, raising=False)
     body = {"code": "AllocationQuota.FreeTierOnly"} if status == 400 else {}
     error = APIStatusError(str(body), response=httpx.Response(status, request=httpx.Request("POST", "https://test")),
                            body=body)
     dash, google = Mock(), Mock()
     primary = AsyncMock(side_effect=error)
-    fallback = AsyncMock(return_value=gemini_result(Intent(intent_type="deep_diagnosis")))
+    fallback = AsyncMock(return_value=gemini_result(stock_analysis.Analysis(analysis_text="분석", citations=[])))
     dash.return_value.with_structured_output.return_value.ainvoke = primary
     google.return_value.with_structured_output.return_value.ainvoke = fallback
     monkeypatch.setattr(llm, "ChatOpenAI", dash)
     monkeypatch.setattr(llm, "ChatGoogleGenerativeAI", google)
-    result = asyncio.run(llm.invoke(role, "분류", "공시", Intent))
-    assert result.intent_type == "deep_diagnosis"
+    result = asyncio.run(llm.invoke(role, "분류", "공시", stock_analysis.Analysis))
+    assert result.analysis_text == "분석"
     assert dash.call_args.kwargs == dict(api_key="dash-key", model=model, base_url=llm.BASE_URL,
-                                         temperature=0, timeout=45 if role == "worker" else 15, max_retries=0,
+                                         temperature=0, timeout=30, max_retries=0,
                                          extra_body={"thinking_budget": llm.QWEN_THINKING_BUDGET})
     assert google.call_args.kwargs["model"] == "gemini-3.8-flash"
     assert google.call_args.kwargs["google_api_key"] == "gemini-key"
     primary.assert_awaited_once()
-    fallback.assert_awaited_once_with([("system", "분류"), ("human", "공시")])
+    fallback.assert_awaited_once()
+    assert fallback.await_args.args == ([("system", "분류"), ("human", "공시")],)
     assert primary.await_args.args[0][1] == ("human", "공시")
 
 
@@ -220,7 +213,7 @@ def test_fast_path_stream_and_latency(monkeypatch):
     assert not market.etl.method_calls and not market.external.method_calls
     assert not market.broker.get_five_day_flow.called and not dart_rag.search.called
     portfolio_market.fetch_stocks.assert_not_called()
-    llm.ChatOpenAI.assert_called_once()
+    llm.ChatOpenAI.assert_not_called()
     llm.ChatGoogleGenerativeAI.assert_not_called()
 
 
@@ -271,20 +264,19 @@ def test_top_three_worker_isolation_guardrail_and_repeated_requests(monkeypatch)
             state = await graph.ainvoke(state)
             raw, checked = state["stock_analysis_results"], state["verified_stock_results"]
             assert [r["stock_code"] for r in raw] == ["000004", "000003", "000002"]
-            assert len(checked) == 3 and len(state["guardrail_warnings"]) == 3
+            assert len(checked) == 3 and state["guardrail_warnings"] == []
             for original, row in zip(raw, checked, strict=True):
                 receipt = RECEIPT[:-1] + row["stock_code"][-1]
-                assert original["doc_map"]["DOC-1"] == receipt and "DOC-99" in original["analysis_text"]
-                assert row["analysis_text"] == (f"2026.11.21 기준 [{receipt}] 희석률은 3.5%입니다. "
-                                                "수급은 안정적입니다.")
-                assert row["citations"] == [receipt]
+                assert original["doc_map"]["DOC-1"] == receipt
+                assert original["analysis_text"] == "" and original["citations"] == []
+                assert row["analysis_text"] == "" and row["citations"] == []
+                assert row["evidence"]["DOC-1"] == receipt
             summary, evidence = state["final_report"].split(stock_analysis.EVIDENCE_HEADING)
             assert "[DOC-1]과 [DOC-3]에 근거한 진단입니다." in summary
             assert f"rcpNo={RECEIPT[:-1]}2" in evidence and f"rcpNo={RECEIPT[:-1]}4" in evidence
-            assert "발행은 확정" not in state["final_report"]
-            assert all("DOC-99" in w for w in state["guardrail_warnings"])
             assert state["quant_scorecards"]["000001"]["total"] == 90
     asyncio.run(check())
+    llm.ChatOpenAI.assert_not_called()
 
 
 def test_guardrail_rejects_malformed_worker_independently():
@@ -353,32 +345,35 @@ def test_health_and_request_boundary():
                 assert response.status_code == 422
     asyncio.run(check())
 
-def test_cloud_prompts_allow_only_masked_indicators_and_disclosures(monkeypatch):
+def test_cloud_prompt_allows_only_masked_indicators_and_disclosures(monkeypatch):
     stock = replace(position(), quantity=D("812345"), market_value=D("987654321"))
     market = setup_market(monkeypatch, [stock])
     market.broker.get_balance.return_value = Balance(D("987123456"), D("1974777777"), D("0.50"), (stock,))
     query = "계좌 87654321-01의 812345주, 평가액 987654321원, 예수금 987123456원 위험 진단"
-    captured = {}
-    structured = llm.ChatOpenAI.return_value.with_structured_output
-    original = structured.side_effect
-
-    def record(schema, **kwargs):
-        runnable = original(schema, **kwargs)
-        captured[schema] = runnable.ainvoke
-        return runnable
-
-    structured.side_effect = record
     state = asyncio.run(build_graph(market).ainvoke({"user_query": query}))
     assert stock_analysis.ANSWER_HEADING in state["final_report"]
-    worker = json.loads(captured[stock_analysis.Analysis].await_args.args[0][-1][1])
     synthesis = llm.ChatGoogleGenerativeAI.return_value.with_structured_output.return_value.ainvoke
     portfolio = json.loads(synthesis.await_args.args[0][-1][1])
-    assert portfolio == [worker]
-    assert worker == {"name": stock.name, "weight_pct": "20.0", "profit_loss_pct": "-16.67", "scorecard": 90,
-                      "disclosures": [{"source": "DOC-1", "title": "발행결정", "text": "희석률은 3.5%다."}]}
+    assert portfolio == [{"name": stock.name, "weight_pct": "20.0", "profit_loss_pct": "-16.67", "scorecard": 90,
+                          "disclosures": [{"source": "DOC-1", "title": "발행결정", "text": "희석률은 3.5%다."}]}]
     for secret in ("87654321", "812345", "987654321", "987123456", "1974777777", RECEIPT):
-        for invocation in (*captured.values(), synthesis):
-            assert secret not in str(invocation.await_args)
+        assert secret not in str(synthesis.await_args)
+    llm.ChatOpenAI.assert_not_called()
+
+
+def test_deep_diagnosis_default_models_make_one_dashscope_call_and_no_worker_call(monkeypatch):
+    market = setup_market(monkeypatch, [position()])
+    monkeypatch.delenv("ANSWER_MODEL")
+    answer = stock_analysis.Analysis(
+        analysis_text="\n".join([stock_analysis.ANSWER_HEADING, "[DOC-1] 기준 진단입니다.",
+                                 stock_analysis.EVIDENCE_HEADING, "- 공시"]),
+        citations=["DOC-1"])
+    llm.ChatOpenAI.return_value.with_structured_output.return_value.ainvoke = AsyncMock(return_value=answer)
+
+    state = asyncio.run(build_graph(market).ainvoke({"user_query": "포트폴리오 위험 진단"}))
+    assert "기준 진단입니다." in state["final_report"]
+    assert llm.ChatOpenAI.call_count == 1 and llm.ChatOpenAI.call_args.kwargs["model"] == "qwen3.8-flash"
+    llm.ChatGoogleGenerativeAI.assert_not_called()
 
 
 @pytest.mark.parametrize("missing_keys", [False, True])
@@ -411,7 +406,7 @@ def test_total_llm_outage_streams_scores_simulation_and_disclosure_evidence(monk
     report = "".join(data["text"] for kind, data in frames if kind == "token")
     assert report == done["final_report"] and "90/100" in report and "DOC-1" in report and RECEIPT in report
     warnings = done["guardrail_warnings"]
-    assert len(warnings) == 3
+    assert len(warnings) == 1
     reason = "API키 미설정" if missing_keys else "응답 시간초과"
     assert any("종합 LLM" in warning and f"[{reason}]" in warning for warning in warnings)
     assert "private-provider-detail" not in str(frames)
@@ -419,7 +414,7 @@ def test_total_llm_outage_streams_scores_simulation_and_disclosure_evidence(monk
         llm.ChatOpenAI.assert_not_called()
         llm.ChatGoogleGenerativeAI.assert_not_called()
     else:
-        assert llm.ChatGoogleGenerativeAI.call_count == 3
+        assert llm.ChatGoogleGenerativeAI.call_count == 1
 
 
 def test_real_langchain_adapters_parse_gemini_fallback(monkeypatch):
@@ -439,7 +434,8 @@ def test_real_langchain_adapters_parse_gemini_fallback(monkeypatch):
         "finishReason": "STOP"}]}))
     monkeypatch.setattr(AsyncCompletions, "with_raw_response", PropertyMock(return_value=Mock(parse=dash)))
     monkeypatch.setattr(AsyncModels, "generate_content", google)
-    assert asyncio.run(stock_analysis.analyze('{"name":"가상 종목"}')) == {"analysis_text": "공시 분석", "citations": []}
+    answer = asyncio.run(llm.invoke("answer", "분석", '{"name":"가상 종목"}', stock_analysis.Analysis))
+    assert answer.model_dump() == {"analysis_text": "공시 분석", "citations": []}
     dash.assert_awaited_once()
     google.assert_awaited_once()
 
