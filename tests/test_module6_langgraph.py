@@ -97,6 +97,12 @@ def setup_market(monkeypatch, positions):
 
     # Workers fetch cards; the card builder itself is covered by test_price_card.
     monkeypatch.setattr(price_card, "get_or_build_card", AsyncMock(side_effect=card))
+
+    async def updates(market, code):
+        # Workers stream card_updates; the graph tests drive it through the get_or_build_card mock.
+        yield await price_card.get_or_build_card(market, code)
+
+    monkeypatch.setattr(price_card, "card_updates", updates)
     monkeypatch.setenv("DASHSCOPE_API_KEY", "dash-test")
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-test")
     # Most graph tests assert the answer prompt and reply on the Gemini mock.

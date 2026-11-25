@@ -1,5 +1,6 @@
 """Request-scoped LangGraph portfolio diagnosis."""
 
+import asyncio
 from dataclasses import asdict
 from datetime import date
 from decimal import Decimal
@@ -13,6 +14,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, Send
 
 from backend import llm, price_card, stock_analysis
+from backend.card_validation import AI_UNAVAILABLE_WARNING
 from backend.broker import Balance
 from backend.finance_calc import calculate_scorecard, simulate_purchase
 from backend.portfolio_market import MarketData, ScoreInputs
@@ -21,6 +23,9 @@ from backend.report import account_view, answer_report, diagnosis_report, quote_
 
 logger = logging.getLogger(__name__)
 MAX_TARGETS = 3
+# Chat waits this long for the analyst's card after the local card, then answers with the local card.
+CARD_WAIT_SECONDS = 40
+SLOW_CARD_WARNING = "가격 카드 AI 분석이 늦어 기본 계산 카드로 답합니다."
 
 
 class Query(TypedDict):
@@ -169,17 +174,36 @@ def build_graph(market: MarketData):
         return Command(goto=route_to_stock_workers(state))
 
     async def stock_worker(job):
-        code = job["stock_code"]
+        code, label = job["stock_code"], job["name"] or job["stock_code"]
+        # The first update is a cached card or the local card; the analyst's card follows it.
+        updates = price_card.card_updates(market, code)
         try:
-            # A cached card is reused; otherwise the analyst builds it (or its local fallback) now.
-            band = (await price_card.get_or_build_card(market, code))["band"]
-        except Exception as exc:  # CancelledError is not an Exception and still propagates.
-            # Provider errors can carry credential-bearing URLs; log the type only.
-            logger.warning("Price card for chat unavailable (%s)", type(exc).__name__)
-            row = {"stock_code": code, "card": None, "doc_map": {}, "disclosures": [], "news": [],
-                   "warnings": [f"{job['name'] or code} 가격 카드를 만들 수 없어 카드 없이 답변합니다."]}
+            try:
+                band = (await anext(updates))["band"]
+            except Exception as exc:  # CancelledError is not an Exception and still propagates.
+                # Provider errors can carry credential-bearing URLs; log the type only.
+                logger.warning("Price card for chat unavailable (%s)", type(exc).__name__)
+                row = {"stock_code": code, "card": None, "doc_map": {}, "disclosures": [], "news": [],
+                       "warnings": [f"{label} 가격 카드를 만들 수 없어 카드 없이 답변합니다."]}
+                return {"stock_analysis_results": [row]}
+            warning = None
+            try:
+                # Bound the wait for the analyst; a cancelled build releases its lock and caches nothing.
+                async with asyncio.timeout(CARD_WAIT_SECONDS):
+                    async for update in updates:
+                        band = update["band"]
+            except TimeoutError:
+                logger.warning("Price card analysis for chat timed out; answering with the local card")
+                warning = f"{label} {SLOW_CARD_WARNING}"
+            except Exception as exc:
+                logger.warning("Price card analysis for chat failed (%s)", type(exc).__name__)
+                warning = f"{label} 가격 카드: {AI_UNAVAILABLE_WARNING}"
+            row = card_row(code, band)
+            if warning:
+                row["warnings"] = [warning]
             return {"stock_analysis_results": [row]}
-        return {"stock_analysis_results": [card_row(code, band)]}
+        finally:
+            await updates.aclose()
 
     async def guardrail_node(state):
         # Cards were validated when built; record them once and surface their warnings.

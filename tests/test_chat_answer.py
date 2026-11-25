@@ -324,3 +324,56 @@ def test_unexpected_answer_error_streams_local_report_and_done_ok(monkeypatch, c
     assert "답변 모델을 사용할 수 없어 로컬 정량 리포트를 제공합니다. [응답 처리 오류]" in done["guardrail_warnings"]
     assert "90/100" in done["final_report"]
     assert "private-detail" not in str(frames) and "private-detail" not in caplog.text
+
+
+def local_fixture(code, name):
+    snapshot = card_fixture(code, name)
+    for level in snapshot["band"]["levels"].values():
+        level["source"] = "local"
+    snapshot["band"].update(ai_status="local", summary="", risks=[])
+    return snapshot
+
+
+def test_slow_card_analysis_answers_with_the_local_card_within_the_bound(monkeypatch):
+    from backend import portfolio_graph
+
+    market = setup_market(monkeypatch, [position()])
+    capture_answer(monkeypatch, reply("[P-2] 20일선 95원을 지키는지 보는 조건입니다.", ["P-2"]))
+    closed = []
+
+    async def updates(market, code):
+        try:
+            yield local_fixture(code, "종목" + code)
+            await asyncio.sleep(30)  # the analyst never answers in time
+            yield card_fixture(code, "종목" + code)
+        finally:
+            closed.append(code)
+
+    monkeypatch.setattr(price_card, "card_updates", updates)
+    monkeypatch.setattr(portfolio_graph, "CARD_WAIT_SECONDS", 0.1)
+
+    async def run():
+        return await asyncio.wait_for(asyncio.to_thread(stream, market, "홀드할까?", "000001"), 5)
+
+    frames = asyncio.run(run())
+    done = frames[-1][1]
+    assert frames[-1][0] == "done" and done["ok"] is True
+    assert "종목000001 가격 카드 AI 분석이 늦어 기본 계산 카드로 답합니다." in done["guardrail_warnings"]
+    assert closed == ["000001"]  # the build generator was closed, so its lock is released
+
+
+def test_card_failure_after_the_local_snapshot_uses_the_local_card(monkeypatch):
+    market = setup_market(monkeypatch, [position()])
+    calls = capture_answer(monkeypatch, reply("[P-2] 20일선 95원을 지키는지 보는 조건입니다.", ["P-2"]))
+
+    async def updates(market, code):
+        yield local_fixture(code, "종목" + code)
+        raise RuntimeError("private-detail")
+
+    monkeypatch.setattr(price_card, "card_updates", updates)
+    frames = stream(market, "홀드할까?", "000001")
+    done = frames[-1][1]
+    assert done["ok"] is True and "private-detail" not in str(frames)
+    assert "종목000001 가격 카드: AI 분석을 사용할 수 없어 기본 계산을 사용했습니다." in done["guardrail_warnings"]
+    card = calls[-1][2]["cards"][0]
+    assert {level["source"] for level in card["levels"].values()} == {"local"}

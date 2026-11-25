@@ -13,6 +13,7 @@ from backend.stock_analysis import cited_sentences
 LEVELS = ("low", "high", "ceiling")
 LEVEL_NAMES = {"low": "단기 저점", "high": "단기 고점", "ceiling": "단기 천장"}
 ATR_WARNING = "변동성 자료 부족으로 기본 계산을 사용했습니다."
+AI_UNAVAILABLE_WARNING = "AI 분석을 사용할 수 없어 기본 계산을 사용했습니다."
 # Length limits live in the validator, not the schema: one overlong field must not discard the whole card.
 MAX_REASON, MAX_SUMMARY, MAX_RISK, MAX_RISKS = 200, 400, 120, 3
 
@@ -112,7 +113,7 @@ def validate_card(analysis: CardAnalysis | None, materials: Materials, local: di
     if analysis is None:
         for name in LEVELS:
             use_local(name)
-        result["warnings"].append("AI 분석을 사용할 수 없어 기본 계산을 사용했습니다.")
+        result["warnings"].append(AI_UNAVAILABLE_WARNING)
         return result
     if m.atr is None:
         for name in LEVELS:

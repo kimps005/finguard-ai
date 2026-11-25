@@ -388,3 +388,34 @@ def test_card_validation_runs_off_the_event_loop_thread(monkeypatch):
     monkeypatch.setattr(price_card, "validate_card", spy)
     final = asyncio.run(get_or_build_card(card_market(), "005930"))
     assert final["band"]["ai_status"] == "ai" and seen == [False]
+
+
+def test_cancelled_build_releases_the_lock_and_caches_nothing(monkeypatch):
+    stalled = asyncio.Event()
+
+    async def never(*args, **kwargs):
+        stalled.set()
+        await asyncio.sleep(30)
+
+    patch(monkeypatch, AsyncMock(side_effect=never))
+    data = card_market()
+    store = {}
+    data.broker.redis = memory_redis(store)
+    key = "finguard:price-card:v1:005930:2026-11-20"
+
+    async def scenario():
+        updates = card_updates(data, "005930")
+        assert (await anext(updates))["band"]["ai_status"] == "local"
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.1):
+                await anext(updates)  # chat gives up while the analyst is still running
+        await updates.aclose()
+        assert stalled.is_set() and store == {}
+        lock = price_card.card_locks.get(key)
+        assert lock is None or not lock.locked()
+        # The next caller is not blocked and builds the card itself.
+        monkeypatch.setattr(price_card.llm, "invoke", analyst())
+        return await asyncio.wait_for(get_or_build_card(data, "005930"), 2)
+
+    final = asyncio.run(scenario())
+    assert final["band"]["ai_status"] == "ai" and key in store
