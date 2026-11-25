@@ -24,6 +24,6 @@ export function describeTask(status: Status, holdings: AccountSnapshot["holdings
   const ticker = code ?? holding?.stock_code;
   const subject = name && ticker ? `${name}(${ticker})` : name ?? ticker;
   const detail = displayField(status, ["task_name", "detail", "message"]);
-  if (subject) return `${subject} ${detail ?? (status.node === "stock_worker" ? stageNames.stock_worker :stageNames[status.node] ?? "분석")}`;
+  if (subject) return `${subject} ${detail ?? (status.node === "stock_worker" ? stageNames.stock_worker : stageNames[status.node] ?? "분석")}`;
   return detail ?? stageNames[status.node] ?? "계좌 데이터 분석";
 }
