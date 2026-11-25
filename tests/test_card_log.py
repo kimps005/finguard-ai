@@ -1,6 +1,7 @@
 """Price-card log: scoring window, UPSERT, and the card_updates hook."""
 
 import asyncio
+import sys
 from datetime import date, timedelta
 from decimal import Decimal as D
 from types import SimpleNamespace
@@ -23,6 +24,13 @@ ROW = {"low": D(1000), "high": D(1100), "ceiling": D(1200),
        "local_low": D(990), "local_high": D(1090), "local_ceiling": D(1150)}
 RESULT_KEYS = {"low_held", "high_reached", "ceiling_held", "local_low_held", "local_high_reached",
                "local_ceiling_held"}
+
+
+def run_db(coro):
+    if sys.platform == "win32":  # libpq async connections require a selector loop.
+        with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+            return runner.run(coro)
+    return asyncio.run(coro)
 
 
 def bars(count=10, low=D(1000), high=D(1100)):
@@ -70,7 +78,7 @@ def test_record_card_upserts_and_resets_scores(db):
         async with connection(row_factory=dict_row) as conn:
             return await (await conn.execute("SELECT * FROM price_card_log")).fetchall()
 
-    rows = asyncio.run(run())
+    rows = run_db(run())
     assert len(rows) == 1
     row = rows[0]
     assert (row["low"], row["high"], row["ceiling"]) == (D(9960), D(10150), D(10250))
