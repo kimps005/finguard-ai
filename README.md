@@ -298,12 +298,12 @@ finguard-ai/
 
 | 역할 | 1차 | 실패 시 |
 | --- | --- | --- |
-| 가격 카드 분석가 | Qwen 3.7-plus (`timeout=30`) | 403·429·할당량·시간초과·5xx면 Gemini를 한 번 호출하고, 그래도 실패하면 로컬 카드와 경고를 반환 |
+| 가격 카드 분석가 | Qwen 3.7-plus (`timeout=60`) | 403·429·할당량·시간초과·5xx면 Gemini를 한 번 호출하고, 그래도 실패하면 로컬 카드와 경고를 반환 |
 | 채팅 답변 | Qwen 3.8-flash | 같은 조건에서 Gemini를 한 번 호출하고, 실패하면 로컬 `diagnosis_report`로 완결 |
 | RAGAS Judge | Gemini 3.8-flash | 평가 전용이며 대체 경로 없음 |
 
 - **할당량 판정**: HTTP 상태 코드를 예외의 `__cause__` 체인을 따라 찾고, 메시지의 `quota`, `free tier`, `allocation exhausted` 패턴도 확인합니다.
-- **응답 검증**: Gemini의 안전 필터 차단(`SAFETY`, `PROHIBITED_CONTENT` 등)이나 빈 응답, 스키마 불일치는 모두 `LLMUnavailable`로 바꿔 상위에 전달합니다. DashScope는 `json_mode`에 스키마를 함께 넣고 Qwen의 추론 토큰을 `thinking_budget=2048`로 제한합니다.
+- **응답 검증**: Gemini의 안전 필터 차단(`SAFETY`, `PROHIBITED_CONTENT` 등)이나 빈 응답, 스키마 불일치는 모두 `LLMUnavailable`로 바꿔 상위에 전달합니다. DashScope는 `json_mode`에 스키마를 함께 넣고 Qwen의 추론 토큰을 역할별 `thinking_budget`(분석가 1024, 답변 2048)으로 제한합니다.
 - **로그 보안**: 공급자 트레이스백에 인증 헤더나 키가 담긴 URL이 섞일 수 있어, 로그에 남기기 전에 `DASHSCOPE_API_KEY`, `GEMINI_API_KEY` 값을 `[REDACTED]`로 치환합니다. SSE 에러 메시지에는 예외 내용을 넣지 않습니다.
 
 **트레이드오프.** 공급자마다 구조화 출력 방식(`with_structured_output` vs `json_mode`)이 달라 어댑터가 둘 필요합니다. `test_real_langchain_adapters_parse_gemini_fallback`이 실제 LangChain 어댑터로 대체 경로를 검증합니다.

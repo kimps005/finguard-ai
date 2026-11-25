@@ -59,7 +59,7 @@ def test_dashscope_failure_falls_back_once_to_gemini(monkeypatch, failure):
     primary.assert_awaited_once()
     fallback.assert_awaited_once()
     assert dash.call_args.kwargs["model"] == "qwen3.7-plus" and dash.call_args.kwargs["timeout"] == 20
-    assert dash.call_args.kwargs["extra_body"] == {"thinking_budget": llm.QWEN_THINKING_BUDGET}
+    assert dash.call_args.kwargs["extra_body"] == {"thinking_budget": 1024}
     assert google.call_args.kwargs["model"] == "gemini-3.8-flash"
     assert google.call_args.kwargs["timeout"] == 20
 
@@ -128,12 +128,12 @@ def test_dashscope_parses_json_content_without_a_tool_call(monkeypatch):
     monkeypatch.setattr(AsyncCompletions, "with_raw_response", PropertyMock(return_value=Mock(parse=request)))
     messages = [("system", "진단"), ("human", "공시")]
 
-    result = asyncio.run(llm.invoke_dashscope("qwen3.7-plus", "test", messages, Analysis, timeout=60))
+    result = asyncio.run(llm.invoke_dashscope("answer", "qwen3.7-plus", "test", messages, Analysis, timeout=60))
 
     assert result == Analysis(analysis_text="공시 위험 진단", citations=["DOC-1"])
     payload = request.await_args.kwargs
     assert payload["response_format"] == {"type": "json_object"}
-    assert payload["extra_body"] == {"thinking_budget": llm.QWEN_THINKING_BUDGET}
+    assert payload["extra_body"] == {"thinking_budget": 2048}
     assert "tools" not in payload
     assert "analysis_text" in payload["messages"][0]["content"]
     assert payload["messages"][1] == {"role": "user", "content": "공시"}
@@ -159,3 +159,49 @@ def test_answer_reports_empty_and_blocked_responses(monkeypatch, metadata, reaso
         asyncio.run(llm.invoke("answer", "진단", "공시", Analysis))
     assert failure.value.reason == reason
     request.assert_awaited_once()
+
+
+def test_thinking_budget_is_chosen_by_role(monkeypatch):
+    clear_models(monkeypatch)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dash")
+    for role, budget in (("analyst", 1024), ("answer", 2048)):
+        dash = Mock()
+        dash.return_value.with_structured_output.return_value.ainvoke = AsyncMock(
+            return_value=Analysis(analysis_text="x", citations=[]))
+        monkeypatch.setattr(llm, "ChatOpenAI", dash)
+        asyncio.run(llm.invoke(role, "진단", "공시", Analysis, timeout=60))
+        assert dash.call_args.kwargs["extra_body"] == {"thinking_budget": budget}
+
+
+def test_gemini_fallback_after_dashscope_timeout_is_capped_at_30_seconds(monkeypatch):
+    clear_models(monkeypatch)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dash")
+    monkeypatch.setenv("GEMINI_API_KEY", "gem")
+    dash, google = Mock(), Mock()
+    dash.return_value.with_structured_output.return_value.ainvoke = AsyncMock(
+        side_effect=APITimeoutError(Request("POST", llm.BASE_URL)))
+    expected = Analysis(analysis_text="공시 위험 진단", citations=[])
+    google.return_value.with_structured_output.return_value.ainvoke = AsyncMock(
+        return_value={"parsed": expected, "raw": AIMessage(content=""), "parsing_error": None})
+    monkeypatch.setattr(llm, "ChatOpenAI", dash)
+    monkeypatch.setattr(llm, "ChatGoogleGenerativeAI", google)
+
+    assert llm.FALLBACK_TIMEOUT == 30
+    assert asyncio.run(llm.invoke("analyst", "진단", "공시", Analysis, timeout=60)) == expected
+    assert dash.call_args.kwargs["timeout"] == 60
+    assert google.call_args.kwargs["timeout"] == 30
+
+
+def test_role_configured_to_gemini_keeps_the_callers_timeout(monkeypatch):
+    clear_models(monkeypatch)
+    monkeypatch.setenv("ANALYST_MODEL", "gemini-3.8-flash")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dash")
+    monkeypatch.setenv("GEMINI_API_KEY", "gem")
+    google = Mock()
+    google.return_value.with_structured_output.return_value.ainvoke = AsyncMock(
+        return_value={"parsed": Analysis(analysis_text="x", citations=[]), "raw": AIMessage(content=""),
+                      "parsing_error": None})
+    monkeypatch.setattr(llm, "ChatGoogleGenerativeAI", google)
+
+    asyncio.run(llm.invoke("analyst", "진단", "공시", Analysis, timeout=60))
+    assert google.call_args.kwargs["timeout"] == 60

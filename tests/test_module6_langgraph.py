@@ -146,7 +146,7 @@ def test_dashscope_quota_falls_back_once_to_gemini(monkeypatch, role, model, sta
     assert result.analysis_text == "분석"
     assert dash.call_args.kwargs == dict(api_key="dash-key", model=model, base_url=llm.BASE_URL,
                                          temperature=0, timeout=30, max_retries=0,
-                                         extra_body={"thinking_budget": llm.QWEN_THINKING_BUDGET})
+                                         extra_body={"thinking_budget": llm.QWEN_THINKING_BUDGET[role]})
     assert google.call_args.kwargs["model"] == "gemini-3.8-flash"
     assert google.call_args.kwargs["google_api_key"] == "gemini-key"
     primary.assert_awaited_once()

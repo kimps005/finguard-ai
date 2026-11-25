@@ -390,14 +390,16 @@ def test_card_validation_runs_off_the_event_loop_thread(monkeypatch):
     assert final["band"]["ai_status"] == "ai" and seen == [False]
 
 
-def test_cancelled_build_releases_the_lock_and_caches_nothing(monkeypatch):
-    stalled = asyncio.Event()
+def test_build_survives_a_consumer_that_goes_away(monkeypatch):
+    release = asyncio.Event()
+    build = analyst().side_effect
 
-    async def never(*args, **kwargs):
-        stalled.set()
-        await asyncio.sleep(30)
+    async def slow(*args, **kwargs):
+        await release.wait()
+        return await build(*args, **kwargs)
 
-    patch(monkeypatch, AsyncMock(side_effect=never))
+    invoke = AsyncMock(side_effect=slow)
+    patch(monkeypatch, invoke)
     data = card_market()
     store = {}
     data.broker.redis = memory_redis(store)
@@ -410,12 +412,74 @@ def test_cancelled_build_releases_the_lock_and_caches_nothing(monkeypatch):
             async with asyncio.timeout(0.1):
                 await anext(updates)  # chat gives up while the analyst is still running
         await updates.aclose()
-        assert stalled.is_set() and store == {}
-        lock = price_card.card_locks.get(key)
-        assert lock is None or not lock.locked()
-        # The next caller is not blocked and builds the card itself.
-        monkeypatch.setattr(price_card.llm, "invoke", analyst())
+        assert invoke.await_count == 1 and store == {} and key in price_card.card_builds
+        release.set()  # the build finishes without any consumer and writes the cache
+        for _ in range(200):
+            if key in store and key not in price_card.card_builds:
+                break
+            await asyncio.sleep(0.01)
+        assert key in store and key not in price_card.card_builds
         return await asyncio.wait_for(get_or_build_card(data, "005930"), 2)
 
     final = asyncio.run(scenario())
-    assert final["band"]["ai_status"] == "ai" and key in store
+    assert final["band"]["ai_status"] == "ai" and invoke.await_count == 1
+
+
+def test_two_consumers_share_one_build(monkeypatch):
+    release = asyncio.Event()
+    build = analyst().side_effect
+
+    async def slow(*args, **kwargs):
+        await release.wait()
+        return await build(*args, **kwargs)
+
+    invoke = AsyncMock(side_effect=slow)
+    patch(monkeypatch, invoke)
+    data = card_market()
+    data.broker.redis = memory_redis({})
+
+    async def scenario():
+        first, second = card_updates(data, "005930"), card_updates(data, "005930")
+        await first.__anext__(), await second.__anext__()
+        a, b = asyncio.create_task(first.__anext__()), asyncio.create_task(second.__anext__())
+        await asyncio.sleep(0.05)
+        release.set()
+        return await a, await b
+
+    a, b = asyncio.run(scenario())
+    assert a == b and a["band"]["ai_status"] == "ai"
+    assert invoke.await_count == 1
+
+
+def test_failed_build_without_consumers_is_not_left_unretrieved(monkeypatch, recwarn):
+    import gc
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("build exploded")
+
+    patch(monkeypatch, AsyncMock(side_effect=analyst().side_effect))
+    monkeypatch.setattr(price_card, "built_card", boom)
+    data = card_market()
+    data.broker.redis = memory_redis({})
+    key = "finguard:price-card:v1:005930:2026-11-20"
+    errors = []
+
+    async def scenario():
+        asyncio.get_running_loop().set_exception_handler(lambda loop, context: errors.append(context))
+        updates = card_updates(data, "005930")
+        await anext(updates)
+        pending = asyncio.create_task(anext(updates))
+        await asyncio.sleep(0.05)  # the build is running; the consumer goes away
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        await updates.aclose()
+        for _ in range(100):
+            if key not in price_card.card_builds:
+                break
+            await asyncio.sleep(0.01)
+        gc.collect()
+        await asyncio.sleep(0.01)
+
+    asyncio.run(scenario())
+    assert key not in price_card.card_builds
+    assert errors == []

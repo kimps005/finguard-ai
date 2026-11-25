@@ -22,7 +22,10 @@ Role = Literal["analyst", "answer", "judge"]
 DEFAULTS = {"analyst": "qwen3.7-plus", "answer": "qwen3.8-flash",
             "fallback": "gemini-3.8-flash", "judge": "gemini-3.8-flash"}
 BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-QWEN_THINKING_BUDGET = 2048
+# Reasoning-token cap per role: the analyst must fit its 60s window (2048 took ~45s, 1024 ~25s).
+QWEN_THINKING_BUDGET = {"analyst": 1024, "answer": 2048}
+# A Gemini call that follows a DashScope failure never waits longer than this.
+FALLBACK_TIMEOUT = 30
 logger = logging.getLogger(__name__)
 # The model that produced the last successful invoke() in this context: the role's DashScope model,
 # or the Gemini model it fell back to. Callers that log the answering model read it right after awaiting.
@@ -134,12 +137,12 @@ async def invoke_gemini(role, model, messages, schema, *, timeout=30):
         ) from (result["parsing_error"] or exc)
 
 
-async def invoke_dashscope(model, key, messages, schema, *, timeout):
+async def invoke_dashscope(role, model, key, messages, schema, *, timeout):
     if not key:
         raise LLMUnavailable("DashScope API key is missing", reason="API키 미설정")
     options = {}
-    if model in (DEFAULTS["analyst"], DEFAULTS["answer"]):
-        options["extra_body"] = {"thinking_budget": QWEN_THINKING_BUDGET}
+    if model in (DEFAULTS["analyst"], DEFAULTS["answer"]) and role in QWEN_THINKING_BUDGET:
+        options["extra_body"] = {"thinking_budget": QWEN_THINKING_BUDGET[role]}
     client = await asyncio.to_thread(
         ChatOpenAI, api_key=key, base_url=os.getenv("DASHSCOPE_BASE_URL", "").strip() or BASE_URL,
         model=model, temperature=0, timeout=timeout, max_retries=0, **options,
@@ -174,7 +177,7 @@ async def invoke(role: Role, instruction: str, context: str, schema, *, timeout:
     try:
         if not model.startswith("gemini") and key:
             try:
-                result = await invoke_dashscope(model, key, messages, schema, timeout=timeout)
+                result = await invoke_dashscope(role, model, key, messages, schema, timeout=timeout)
                 last_model.set(model)
                 return result
             except Exception as exc:
@@ -182,6 +185,7 @@ async def invoke(role: Role, instruction: str, context: str, schema, *, timeout:
                     raise
                 log_failure(role, model, exc)
             model = model_name("fallback")
+            timeout = min(timeout, FALLBACK_TIMEOUT)
         elif not model.startswith("gemini"):
             model = model_name("fallback")
         result = await invoke_gemini(role, model, messages, schema, timeout=timeout)

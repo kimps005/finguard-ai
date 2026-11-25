@@ -24,7 +24,7 @@ from backend.report import account_view, answer_report, diagnosis_report, quote_
 logger = logging.getLogger(__name__)
 MAX_TARGETS = 3
 # Chat waits this long for the analyst's card after the local card, then answers with the local card.
-CARD_WAIT_SECONDS = 40
+CARD_WAIT_SECONDS = 45
 SLOW_CARD_WARNING = "가격 카드 AI 분석이 늦어 기본 계산 카드로 답합니다."
 
 
@@ -188,7 +188,7 @@ def build_graph(market: MarketData):
                 return {"stock_analysis_results": [row]}
             warning = None
             try:
-                # Bound the wait for the analyst; a cancelled build releases its lock and caches nothing.
+                # Bound the wait for the analyst; the build keeps running and caches its card for the next request.
                 async with asyncio.timeout(CARD_WAIT_SECONDS):
                     async for update in updates:
                         band = update["band"]

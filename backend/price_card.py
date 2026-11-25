@@ -5,7 +5,6 @@ from datetime import date, datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 import json
 import logging
-from weakref import WeakValueDictionary
 
 from backend import dart_rag, llm
 from backend.card_log import record_card
@@ -21,11 +20,12 @@ from backend.stock_master import fetch_stocks
 
 
 logger = logging.getLogger(__name__)
-# One lock per cache key (stock and session) while a request holds it; unused locks are collected.
-card_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+# One in-flight build per cache key (stock and session). Strong references keep a build alive after its
+# consumer (chat timeout, closed SSE) goes away; the done-callback removes the entry.
+card_builds: dict[str, asyncio.Task] = {}
 HORIZON_SESSIONS = 10
 BAR_DAYS = 120
-ANALYST_TIMEOUT = 30
+ANALYST_TIMEOUT = 60
 BALANCE_TIMEOUT = 5
 CACHE_KEY = "finguard:price-card:v1:{code}:{session}"
 NEWS_LIMIT = 10
@@ -289,11 +289,27 @@ async def card_updates(market, stock_code: str):
     local = local_levels(band)
     yield snapshot(now, band, facts, local_card(local))
 
-    # Chat and the price-card screen may ask for one card at once. Uvicorn runs one worker, so an
-    # in-process lock lets the second caller wait for the first build and read it from the cache.
-    async with card_locks.setdefault(key, asyncio.Lock()):
-        final = await cached_card(broker, key) or await built_card(market, stock, now, key, band, facts, holding)
-    yield final  # outside the lock: a slow consumer never holds up the next build
+    # Chat and the price-card screen may ask for one card at once. Uvicorn runs one worker, so both await
+    # the same in-process build task; shield() keeps it running (and caching) if this consumer is cancelled.
+    task = card_builds.get(key)
+    if task is None:
+        task = asyncio.create_task(
+            final_card(market, stock, now, key, band, facts, holding), name=f"price-card:{key}")
+        card_builds[key] = task
+        task.add_done_callback(lambda done: finish_build(key, done))
+    final = await asyncio.shield(task)
+    yield final
+
+
+async def final_card(market, stock, now, key, band, facts, holding) -> dict:
+    return await cached_card(market.broker, key) or await built_card(market, stock, now, key, band, facts, holding)
+
+
+def finish_build(key, task):
+    if card_builds.get(key) is task:
+        del card_builds[key]
+    if not task.cancelled() and (exc := task.exception()) is not None:
+        logger.warning("Price card build failed (%s)", type(exc).__name__)
 
 
 async def cached_card(broker, key) -> dict | None:
