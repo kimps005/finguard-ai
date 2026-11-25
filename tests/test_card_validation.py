@@ -261,3 +261,19 @@ def test_bare_number_near_a_small_current_price_is_price_like():
     assert validate_card(proposal(summary="770 부근 지지입니다."), m, LOCAL)["summary"] == ""
     for text in ("760 부근 지지입니다.", "2026년 실적은 양호합니다.", "[P-2] 저점 근거입니다.", "10거래일 흐름입니다."):
         assert validate_card(proposal(summary=text), m, LOCAL)["summary"] == text, text
+
+
+def test_compound_man_won_prices_above_one_million_pass_when_listed():
+    # 000660 at 1,030,000원: the analyst writes "101만4000원" for its own 1,014,000 proposal.
+    facts = [Fact("P-1", "현재가", D(1030000)), Fact("P-2", "스윙 저점", D(1014000)),
+             Fact("P-3", "5일선", D(1113800)), Fact("P-4", "매물대", D(1150000), D(1186000))]
+    m = Materials(facts=facts, news=NEWS, docs=DOCS, current=D(1030000), atr=D(40000))
+    analysis = proposal(
+        low=("1014000", ["P-2"], "코스피 급락과 함께 기록한 101만4000원의 단기 저점을 매수 검토 기준으로 설정하였다."),
+        high=("1113800", ["P-3"], "5일 이동평균선이자 매물대 하단인 111만3800원을 단기 고점으로 본다."),
+        ceiling=("1186000", ["P-4"], "2주 상단은 매물대 상단인 118만 6,000원이다."))
+    card = validate_card(analysis, m, LOCAL)
+    assert sources(card) == {"low": "ai", "high": "ai", "ceiling": "ai"}, card["warnings"]
+    # A compound amount that is not in the input is still dropped.
+    bad = proposal(low=("1014000", ["P-2"], "101만4000원과 100만5000원 사이 저점"))
+    assert validate_card(bad, m, LOCAL)["levels"]["low"]["source"] == "local"

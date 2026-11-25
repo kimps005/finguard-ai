@@ -584,3 +584,11 @@ def test_worker_status_events_name_their_stock_once(monkeypatch):
     assert {d["task_id"] for d in completed} == set(started) and all("stock_code" not in d for d in completed)
     # Other nodes carry no stock fields, and nothing from the user's query leaks into statuses.
     assert all(set(d) == {"node", "phase", "task_id", "stock_code", "stock_name"} for d in started.values())
+
+
+def test_guardrail_keeps_compound_man_won_figures_that_are_listed():
+    worker = {"stock_code": "ok", "analysis_text": "저점은 101만4000원입니다 [P-2]. 목표는 120만3000원입니다 [P-2].",
+              "citations": ["P-2"], "doc_map": {"P-2": "P-2"}}
+    result = stock_analysis.verify_results([worker], allowed={D(1014000)}, near=[D(1030000)])
+    assert result["verified_stock_results"][0]["analysis_text"] == "저점은 101만4000원입니다 [P-2]."
+    assert result["guardrail_warnings"] == ["ok 입력에 없는 수치가 있는 문장 1개를 제외했습니다."]

@@ -92,22 +92,48 @@ def _near(value: Decimal, prices) -> bool:
     return any(price * _NEAR_LOW <= value <= price * _NEAR_HIGH for price in prices)
 
 
-def _figures(text: str, near=()):
-    """(written form, absolute value) of each price-like figure: a unit, a multiplier or a large plain number.
+def _large(raw: str) -> bool:
+    """A plain number written with a comma or four or more integer digits reads as a price."""
+    return "," in raw or len(raw.split(".")[0]) >= 4
 
-    A small plain number within ±50% of a price in `near` (a current price) is price-like too, so
-    "785 부근" counts for a sub-1,000원 stock; years ("2026년") and counted words ("10거래일") do not.
-    """
+
+def _parts(text: str):
+    """(match, absolute value, multiplier) of each NUMBER match, skipping years, counts and period words."""
     for match in NUMBER.finditer(text):
         _, raw, mult, unit, year = match.groups()
         digits = raw.replace(",", "")
-        if not (unit or mult) and (year or not ("," in raw or len(digits.split(".")[0]) >= 4)):
-            counted = text[match.end():match.end() + 1] in _COUNTERS
-            if year or counted or not _near(Decimal(digits), near):
-                continue  # plain small number or a year, not a price-like figure
+        if not (unit or mult) and (year or (not _large(raw) and text[match.end():match.end() + 1] in _COUNTERS)):
+            continue  # a year ("2026년") or a small count ("10거래일"), never a price
         if unit == "주" and not mult and (raw == "2" or text[match.end():match.end() + 1] in _PERIOD_SUFFIX):
             continue  # "2주" is the card horizon; "3주간", "10주선" are periods, not share counts
-        yield match[0].strip(), Decimal(digits) * _MULTIPLIER.get(mult, Decimal(1))
+        scale = _MULTIPLIER.get(mult, Decimal(1))
+        yield match, Decimal(digits) * scale, scale
+
+
+def _figures(text: str, near=()):
+    """(written form, absolute value) of each price-like figure: a unit, a multiplier or a large plain number.
+
+    A compound Korean amount reads as one figure: "101만4000원" and "101만 4,000원" are 1,014,000 and
+    "1억2000만원" is 120,000,000. A part joins the amount before it when it directly follows a unitless
+    multiplier and stays below it. A small plain number within ±50% of a price in `near` (a current price)
+    is price-like too, so "785 부근" counts for a sub-1,000원 stock.
+    """
+    parts = list(_parts(text))
+    i = 0
+    while i < len(parts):
+        first, value, scale = parts[i]
+        last = first
+        while (i + 1 < len(parts) and last[4] is None and scale > 1 and not parts[i + 1][0][1]
+               and text[last.end():parts[i + 1][0].start()] in ("", " ") and parts[i + 1][1] < scale):
+            i += 1
+            last, part, scale = parts[i]
+            value += part
+        i += 1
+        raw, mult, unit = first[2], first[3], last[4]
+        if last is first and not (unit or mult) and not _large(raw):
+            if not _near(Decimal(raw), near):
+                continue  # plain small number, not a price-like figure
+        yield text[first.start():last.end()].strip(), value
 
 
 def figures(text: str) -> set[Decimal]:
