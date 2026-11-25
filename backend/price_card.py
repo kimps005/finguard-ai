@@ -318,7 +318,9 @@ async def built_card(market, stock, now, key, band, facts, holding) -> dict:
     except llm.LLMUnavailable as exc:
         logger.warning("Analyst card unavailable (%s)", exc.reason)
         analysis = None
-    final = snapshot(now, band, facts, validate_card(analysis, materials, local), retrieved)
+    # Kiwi sentence splitting is CPU-bound; keep it off the event loop.
+    card = await asyncio.to_thread(validate_card, analysis, materials, local)
+    final = snapshot(now, band, facts, card, retrieved)
     # A local-only card is kept briefly so the next selection retries the analyst.
     ttl = min(card_ttl(now), SESSION_TTL) if final["band"]["ai_status"] == "local" else card_ttl(now)
     try:

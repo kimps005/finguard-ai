@@ -372,3 +372,19 @@ def test_malformed_cache_entry_rebuilds_the_card(monkeypatch):
     snapshots = asyncio.run(collect(card_updates(data, "005930")))
     assert len(snapshots) == 2 and snapshots[-1]["band"]["ai_status"] == "ai"
     assert invoke.await_count == 1
+
+
+def test_card_validation_runs_off_the_event_loop_thread(monkeypatch):
+    import threading
+
+    patch(monkeypatch, analyst())
+    seen = []
+    validate = price_card.validate_card
+
+    def spy(*args):
+        seen.append(threading.current_thread() is threading.main_thread())
+        return validate(*args)
+
+    monkeypatch.setattr(price_card, "validate_card", spy)
+    final = asyncio.run(get_or_build_card(card_market(), "005930"))
+    assert final["band"]["ai_status"] == "ai" and seen == [False]
