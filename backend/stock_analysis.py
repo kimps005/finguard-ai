@@ -20,6 +20,19 @@ LEVEL_LABELS = {"buy_zone": "단기 저점(매수 검토)", "sell_zone": "단기
                 "peak_limit": "2주 상단(넘기 어려운 가격)"}
 SHARE_FACTS = ("외국인 5일 순매수", "기관 5일 순매수")
 WEB_LINK = re.compile(r"^https?://\S+$", re.IGNORECASE)
+# Spec failure condition: a firm buy/sell order, as opposed to a "검토" condition.
+DEFINITIVE_ORDER = re.compile(r"(반드시|무조건|지금\s*바로|당장)\s*.{0,6}(매수|매도|사세요|파세요|사라|팔아라|사야|팔아야)")
+ACCOUNT_LIKE = re.compile(r"[0-9]{10,}|[0-9]{8}-?[0-9]{2}")
+ACCOUNT_PLACEHOLDER = "(계좌번호 생략)"
+
+
+def mask_accounts(text, account_numbers=()):
+    """Hide account-like digit runs, then the configured account numbers, before text leaves the server."""
+    text = ACCOUNT_LIKE.sub(ACCOUNT_PLACEHOLDER, text)
+    # A short identifier (a Toss account seq such as "1") would also erase ordinary numbers.
+    for number in sorted((n for n in account_numbers if len(n) >= 6), key=len, reverse=True):
+        text = text.replace(number, ACCOUNT_PLACEHOLDER)
+    return text
 
 ANSWER_PROMPT = (
     "너는 한국 주식 계좌 질문에 답하는 어시스턴트다. 사용자 메시지 JSON의 question에 답하되, "
@@ -144,14 +157,16 @@ def context_numbers(value):
         yield from figures(value)
 
 
-async def answer(state):
+async def answer(state, account_numbers=()):
     """Qwen answer to the user's question from the account and the target cards, verified per sentence.
 
+    The question goes verbatim except account numbers (`account_numbers` and account-like digit runs).
     Returns (core answer, cited sources as (tag, title, receipt | link | None), warnings). Raises
     LLMUnavailable when the model fails or nothing survives verification.
     """
     cards, sources = card_contexts(state["verified_stock_results"])
-    context = {"question": state["user_query"], "account": account_context(state), "cards": cards,
+    question = mask_accounts(state["user_query"], account_numbers)
+    context = {"question": question, "account": account_context(state), "cards": cards,
                "simulation": simulation_context(state["simulation_result"])}
     reply = await llm.invoke("answer", ANSWER_PROMPT, dump(context), Analysis)
     sections = re.fullmatch(
@@ -160,7 +175,7 @@ async def answer(state):
     )
     if not sections or any(not section.strip() or re.search(r"(?m)^\s*#", section) for section in sections.groups()):
         raise llm.LLMUnavailable("Invalid answer report format", reason="응답 형식 오류")
-    allowed = with_rounded({number for value in context_numbers(context) for number in (value, abs(value))})
+    allowed = with_rounded(set(context_numbers(context)))  # unlisted_number compares absolute values
     verified = await asyncio.to_thread(verify_results, [{
         "analysis_text": sections[1].strip(), "citations": reply.citations, "stock_code": "종합 진단",
         "doc_map": {tag: tag for tag in sources}}], allowed=allowed)
@@ -203,19 +218,20 @@ def verify_results(raw, *, allowed):
 
         visible = worker.doc_map.keys()
         unknown = set(worker.citations) - visible
-        lines, cited, receipts, numbers = [], {}, False, []
+        lines, cited, receipts, numbers, orders = [], {}, False, 0, 0
         for line in worker.analysis_text.splitlines():
             kept = []
             for text in cited_sentences(line):
                 tags = TAG.findall(text)
                 missing = set(tags) - visible
                 receipt = RECEIPT.search(text)
-                number = None if receipt else unlisted_number(text, allowed)
+                number = not receipt and unlisted_number(text, allowed) is not None
+                order = bool(DEFINITIVE_ORDER.search(text))
                 unknown.update(missing)
                 receipts = receipts or bool(receipt)
-                if number is not None:
-                    numbers.append(number)
-                if not (missing or receipt or number is not None):
+                numbers += number
+                orders += order
+                if not (missing or receipt or number or order):
                     kept.append(text)
                     cited.update(dict.fromkeys(tags))
             if kept or not line.strip():
@@ -224,8 +240,11 @@ def verify_results(raw, *, allowed):
             warnings.append(f"{worker.stock_code} 미등록 인용 제외 ({', '.join(sorted(unknown))})")
         if receipts:
             warnings.append(f"{worker.stock_code} 별칭 없는 공시번호 문장 제외")
+        # Counts only: repeating an unverified figure in a warning would show it to the user anyway.
         if numbers:
-            warnings.append(f"{worker.stock_code} 입력에 없는 수치 문장 제외 ({', '.join(numbers)})")
+            warnings.append(f"{worker.stock_code} 입력에 없는 수치가 있는 문장 {numbers}개를 제외했습니다.")
+        if orders:
+            warnings.append(f"{worker.stock_code} 확정적 매수·매도 지시 문장 {orders}개를 제외했습니다.")
         text = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
         verified.append({"stock_code": worker.stock_code, "analysis_text": text,
                          "citations": list(cited), "evidence": worker.doc_map})

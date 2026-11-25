@@ -196,6 +196,19 @@ def test_number_guard_covers_multipliers_and_unitless_prices():
     assert validate_card(proposal(summary="기준 3천원입니다."), m, LOCAL)["summary"] == "기준 3천원입니다."
 
 
+def test_negative_and_hyphenated_figures_are_checked():
+    for text in ("하락폭은 -3,900원입니다.", "95-3,900원 구간입니다.", "현재가 대비 -12.5% 하락입니다."):
+        assert validate_card(proposal(summary=text), M, LOCAL)["summary"] == "", text
+        assert validate_card(proposal(low=("2982", ["P-2"], text)), M, LOCAL)["levels"]["low"]["source"] == "local"
+    # A listed negative (a held stock's return) is compared by absolute value and kept.
+    m = Materials(facts=FACTS, news=NEWS, docs=DOCS, current=D(3100), atr=D(60), extra_numbers={D("-16.67")})
+    for text in ("수익률 -16.67% 구간입니다.", "손실률 16.67%입니다."):
+        assert validate_card(proposal(summary=text), m, LOCAL)["summary"] == text, text
+    # Letter-hyphen tags are not negative numbers.
+    text = "근거는 [P-2]와 DOC-1, NEWS-1입니다."
+    assert validate_card(proposal(summary=text), M, LOCAL)["summary"] == text
+
+
 def test_period_words_after_ju_are_not_share_counts():
     for text in ("향후 2주간 박스권입니다.", "3주차 흐름입니다.", "10주선 위에 있습니다.",
                  "5주봉 기준입니다.", "4주일 동안 횡보했습니다.", "2주째 상승입니다."):

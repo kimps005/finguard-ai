@@ -113,19 +113,22 @@ def test_answer_context_has_question_and_account_but_no_account_number(monkeypat
     monkeypatch.setenv("APP_ACCESS_PIN", "pin-2468")
     monkeypatch.setenv("DART_API_KEY", "dart-key-1")
     calls = capture_answer(monkeypatch, reply("[P-2] 20일선 95원 위라면 보유를 검토할 조건입니다.", ["P-2"]))
-    query = f"{stock.name} 추가매수할까? 홀드할까?"
+    query = f"{stock.name} 계좌 87654321-01과 모의 12349876, 1234567890123번으로 추가매수할까? 홀드할까?"
     event, done = stream(market, query)[-1]
     assert event == "done" and done["ok"]
     role, _, context = calls[0]
     assert set(context) == {"question", "account", "cards", "simulation"}
-    assert context["question"] == query
+    # The question goes verbatim except account numbers: configured ones and account-like digit runs.
+    masked = "(계좌번호 생략)"
+    assert context["question"] == f"{stock.name} 계좌 {masked}과 모의 {masked}, {masked}번으로 추가매수할까? 홀드할까?"
     assert context["account"] == {"holdings": [{
         "name": stock.name, "code": stock.stock_code, "quantity": "812345", "average_price": "120",
         "current_price": "100", "weight_pct": "20.00", "profit_loss_pct": "-16.67"}],
         "cash": "1234.56", "total": "2000"}
     assert context["simulation"] == {"message": "사용할 주문 가능 현금의 비율(%) 또는 투자 금액(원)을 한 개 지정해 주세요."}
     raw = json.dumps(context, ensure_ascii=False)
-    for secret in ("87654321", "12349876", "kis-live", "kis-paper", "pin-2468", "dart-key-1",
+    assert stock_analysis.mask_accounts("1주를 10% 추가", ["1"]) == "1주를 10% 추가"
+    for secret in ("87654321", "12349876", "1234567890123", "kis-live", "kis-paper", "pin-2468", "dart-key-1",
                    "dash-test", "gemini-test", RECEIPT):
         assert secret not in raw
 
@@ -167,7 +170,9 @@ def test_sentence_with_unlisted_price_is_dropped_with_warning(monkeypatch):
     core, _, warnings = asyncio.run(stock_analysis.answer(state))
     assert core == ("[P-2] 20일선 95원을 지키면 추가매수를 검토할 수 있는 조건입니다. "
                     "질문하신 3.5% 하락은 16.67% 손실 구간과 겹칩니다.\n\n보유 수량 4주는 그대로 두는 조건입니다.")
-    assert "종합 진단 입력에 없는 수치 문장 제외 (3,900원)" in warnings
+    # The warning counts dropped sentences; it never repeats the unverified figure.
+    assert "종합 진단 입력에 없는 수치가 있는 문장 1개를 제외했습니다." in warnings
+    assert not any("3,900" in warning for warning in warnings)
     assert "종합 진단 미등록 인용 제외 (DOC-7)" in warnings
     assert "종합 진단 별칭 없는 공시번호 문장 제외" in warnings
     # An answer with no surviving sentence is unusable; the local report takes over.
@@ -175,6 +180,21 @@ def test_sentence_with_unlisted_price_is_dropped_with_warning(monkeypatch):
     with pytest.raises(llm.LLMUnavailable) as failure:
         asyncio.run(stock_analysis.answer(state))
     assert failure.value.reason == "응답 검증 실패"
+
+
+def test_negative_figures_and_definitive_orders_are_dropped(monkeypatch):
+    band = card_fixture("000001", "종목000001")["band"]
+    capture_answer(monkeypatch, reply(
+        "[P-2] 20일선 95원 회복 전까지는 보유 기준으로 보는 조건입니다. 하락폭은 -3,900원입니다. "
+        "95-3,900원 구간입니다. 현재가 대비 -12.5% 하락입니다. 수익률 -16.67%는 손실 구간입니다. "
+        "지금 바로 매수하세요. 반드시 전량 매도해야 합니다. 당장 사세요.", ["P-2"]))
+    state = answer_state([band], holdings=[position()])
+    core, _, warnings = asyncio.run(stock_analysis.answer(state))
+    # A held stock's -16.67% return is listed and kept; unlisted negatives and firm orders are not.
+    assert core == "[P-2] 20일선 95원 회복 전까지는 보유 기준으로 보는 조건입니다. 수익률 -16.67%는 손실 구간입니다."
+    assert "종합 진단 입력에 없는 수치가 있는 문장 3개를 제외했습니다." in warnings
+    assert "종합 진단 확정적 매수·매도 지시 문장 3개를 제외했습니다." in warnings
+    assert not any(term in warning for warning in warnings for term in ("3,900", "12.5"))
 
 
 def test_answer_outage_streams_local_report_and_done_ok(monkeypatch):

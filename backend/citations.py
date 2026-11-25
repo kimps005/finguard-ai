@@ -10,7 +10,9 @@ TAG = re.compile(r"(?<![A-Za-z0-9])(?:DOC|NEWS|P)-[0-9]+(?![0-9])")
 TAG_MARK = re.compile(r"\[(?:DOC|NEWS|P)-[0-9]+\]")
 RECEIPT = re.compile(r"(?<![0-9])[0-9]{14}(?![0-9])")
 RECEIPT_PLACEHOLDER = "(공시번호 생략)"
-NUMBER = re.compile(r"(?<![0-9.,A-Za-z-])([0-9][0-9,]*(?:\.[0-9]+)?)(?:\s?([천만억]))?(?:\s?(원|주|%))?(년)?")
+# A leading minus counts as a sign ("-3,900원", "95-3,900원") unless a letter precedes it: P-2, DOC-1, NEWS-3.
+NUMBER = re.compile(r"(?:(?<![A-Za-z])(-)|(?<![0-9.,A-Za-z-]))"
+                    r"([0-9][0-9,]*(?:\.[0-9]+)?)(?:\s?([천만억]))?(?:\s?(원|주|%))?(년)?")
 _PERIOD_SUFFIX = tuple("간일차봉선째")
 _MULTIPLIER = {"천": Decimal(1000), "만": Decimal(10000), "억": Decimal(10) ** 8}
 
@@ -71,9 +73,9 @@ def with_rounded(values) -> set[Decimal]:
 
 
 def _figures(text: str):
-    """(written form, value) of each price-like figure: a unit, a multiplier or a large plain number."""
+    """(written form, absolute value) of each price-like figure: a unit, a multiplier or a large plain number."""
     for match in NUMBER.finditer(text):
-        raw, mult, unit, year = match.groups()
+        _, raw, mult, unit, year = match.groups()
         digits = raw.replace(",", "")
         if not (unit or mult) and (year or not ("," in raw or len(digits.split(".")[0]) >= 4)):
             continue  # plain small number or a year, not a price-like figure
@@ -87,5 +89,9 @@ def figures(text: str) -> set[Decimal]:
 
 
 def unlisted_number(text: str, allowed: set[Decimal]) -> str | None:
-    """The first price-like figure whose value is not in `allowed`, as written; None when all are listed."""
-    return next((written for written, value in _figures(text) if value not in allowed), None)
+    """The first price-like figure not in `allowed`, as written; None when all are listed.
+
+    Figures compare by absolute value, so a listed -16.67 allows "-16.67%" and "16.67% 손실".
+    """
+    listed = {abs(value) for value in allowed}
+    return next((written for written, value in _figures(text) if value not in listed), None)

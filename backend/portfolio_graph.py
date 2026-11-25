@@ -93,6 +93,14 @@ def route_to_stock_workers(state: PortfolioState) -> str | list[Send]:
     return [Send("stock_worker", {"stock_code": code, "name": names.get(code)}) for code in codes]
 
 
+def account_numbers(broker) -> list[str]:
+    """Configured account identifiers (KIS CANO for both domains, Toss account seq) to mask in questions."""
+    settings = getattr(broker, "settings", None)
+    candidates = [getattr(getattr(settings, domain, None), "account_no", None) for domain in ("live", "virtual")]
+    candidates.append(getattr(getattr(getattr(broker, "account", None), "settings", None), "account_seq", None))
+    return [value.strip() for value in candidates if isinstance(value, str) and value.strip()]
+
+
 def card_row(stock_code, band):
     """A worker row: the card, plus the doc_map/disclosures shape the local report links filings from."""
     docs = band["disclosures"]
@@ -192,7 +200,7 @@ def build_graph(market: MarketData):
             report = None
             if state["holdings"] or state["verified_stock_results"]:
                 try:
-                    core, sources, notes = await stock_analysis.answer(state)
+                    core, sources, notes = await stock_analysis.answer(state, account_numbers(market.broker))
                     warnings.extend(notes)
                     report = answer_report(state, core, sources)
                 except llm.LLMUnavailable as exc:
