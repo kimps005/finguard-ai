@@ -137,3 +137,39 @@ def test_summary_table_reports_ai_and_local_rates():
     table = script.summary_table(rows)
     assert "scored cards: 2" in table
     assert "100.0% (2/2)" in table and "50.0% (1/2)" in table
+
+
+def load_script():
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location(
+        "score_price_cards", Path(__file__).parents[1] / "scripts" / "score_price_cards.py")
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    return script
+
+
+def sessions(*days):
+    return [DailyBar(AS_OF + timedelta(days=day), D(1000), D(1100), D(1000), D(1000), D(1)) for day in days]
+
+
+def test_window_excludes_the_in_progress_bar():
+    script = load_script()
+    bars = sessions(*range(1, 11))  # the 10th session is the unconfirmed "today"
+    chosen = script.window_bars(AS_OF, bars, AS_OF + timedelta(days=9))
+    assert len(chosen) == 9 and card_log.score_window(ROW, chosen) is None
+
+
+def test_window_skips_as_of_and_caps_at_ten():
+    script = load_script()
+    chosen = script.window_bars(AS_OF, sessions(0, *range(1, 14)), AS_OF + timedelta(days=30))
+    assert [bar.session for bar in chosen] == [AS_OF + timedelta(days=d) for d in range(1, 11)]
+
+
+def test_holiday_gap_scores_once_ten_sessions_exist():
+    script = load_script()
+    # 9 sessions inside the first 22 days, the 10th on day 29 after a long holiday cluster.
+    bars = sessions(1, 2, 3, 4, 5, 6, 7, 8, 21, 29)
+    assert card_log.score_window(ROW, script.window_bars(AS_OF, bars, AS_OF + timedelta(days=22))) is None
+    assert card_log.score_window(ROW, script.window_bars(AS_OF, bars, AS_OF + timedelta(days=30))) is not None

@@ -14,32 +14,41 @@ if __package__ in (None, ""):
 
 from backend import db
 from backend.broker import BrokerConnector
+from backend.market_time import KST, confirmed_day
 from backend.card_log import HORIZON_SESSIONS, score_window
 from backend.toss_broker import TossSettings, toss_account
 
 
 logger = logging.getLogger("score_price_cards")
-# Calendar days that always contain 10 sessions (holidays included).
-FETCH_DAYS = 21
+# The window grows toward the confirmed day, so a long holiday cluster only delays scoring; capped at this span.
+MAX_FETCH_DAYS = 45
 METRICS = (("low_held", "local_low_held"), ("high_reached", "local_high_reached"),
            ("ceiling_held", "local_ceiling_held"))
 RESULT_COLUMNS = tuple(column for pair in METRICS for column in pair)
 
 
-async def unscored_rows(today: date) -> list[dict]:
+async def unscored_rows(confirmed: date) -> list[dict]:
     """Rows without a score whose 10-session window can have closed."""
     async with db.connection(row_factory=dict_row) as conn:
         cursor = await conn.execute(
             "SELECT * FROM price_card_log WHERE scored_at IS NULL AND as_of < %s ORDER BY as_of, stock_code",
-            (today,))
+            (confirmed,))
         return await cursor.fetchall()
 
 
-async def window_bars(broker, row: dict) -> list:
-    """The first 10 sessions strictly after as_of (fewer while the window is still open)."""
+def window_bars(as_of: date, bars, confirmed: date) -> list:
+    """The first 10 final sessions strictly after as_of; an in-progress bar is never included."""
+    final = sorted((bar for bar in bars if as_of < bar.session <= confirmed), key=lambda bar: bar.session)
+    return final[:HORIZON_SESSIONS]
+
+
+async def fetch_window(broker, row: dict, confirmed: date) -> list:
     start = row["as_of"] + timedelta(days=1)
-    bars = await broker.get_daily_bars(row["stock_code"], start, start + timedelta(days=FETCH_DAYS))
-    return sorted((bar for bar in bars if bar.session > row["as_of"]), key=lambda bar: bar.session)[:HORIZON_SESSIONS]
+    end = min(confirmed, row["as_of"] + timedelta(days=MAX_FETCH_DAYS))
+    if start > end:
+        return []
+    bars = await broker.get_daily_bars(row["stock_code"], start, end)
+    return window_bars(row["as_of"], bars, confirmed)
 
 
 async def save_score(row: dict, result: dict) -> None:
@@ -50,11 +59,11 @@ async def save_score(row: dict, result: dict) -> None:
                            {**result, "stock_code": row["stock_code"], "as_of": row["as_of"]})
 
 
-async def score_pending(broker, today: date) -> int:
+async def score_pending(broker, confirmed: date) -> int:
     scored = 0
-    for row in await unscored_rows(today):
+    for row in await unscored_rows(confirmed):
         try:
-            result = score_window(row, await window_bars(broker, row))
+            result = score_window(row, await fetch_window(broker, row, confirmed))
         except Exception as exc:
             logger.warning("Skipping %s %s (%s)", row["stock_code"], row["as_of"], type(exc).__name__)
             continue
@@ -91,7 +100,7 @@ async def main() -> None:
             raise ValueError("BROKER_PROVIDER must be toss or kis")
         account = toss_account(TossSettings.from_env()) if provider == "toss" else None
         async with BrokerConnector.from_env(account=account) as broker:
-            scored = await score_pending(broker, broker.clock().date())
+            scored = await score_pending(broker, confirmed_day(broker.clock().astimezone(KST)))
         print(f"newly scored: {scored}")
         print(summary_table(await summary_rows()))
     finally:
