@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from backend.chart_levels import Fact, round_to_tick
 from backend.citations import RECEIPT, TAG, definitive_order, unlisted_number, with_rounded as _with_rounded
@@ -13,16 +13,18 @@ from backend.stock_analysis import cited_sentences
 LEVELS = ("low", "high", "ceiling")
 LEVEL_NAMES = {"low": "단기 저점", "high": "단기 고점", "ceiling": "단기 천장"}
 ATR_WARNING = "변동성 자료 부족으로 기본 계산을 사용했습니다."
+# Length limits live in the validator, not the schema: one overlong field must not discard the whole card.
+MAX_REASON, MAX_SUMMARY, MAX_RISK, MAX_RISKS = 200, 400, 120, 3
 
 
 class LevelProposal(BaseModel):
     price: str
     basis: list[str]
-    reason: str = Field(max_length=200)
+    reason: str
 
 
 class Risk(BaseModel):
-    text: str = Field(max_length=120)
+    text: str
     basis: list[str]
 
 
@@ -30,8 +32,8 @@ class CardAnalysis(BaseModel):
     low: LevelProposal
     high: LevelProposal
     ceiling: LevelProposal
-    summary: str = Field(max_length=400)
-    risks: list[Risk] = Field(max_length=3)
+    summary: str
+    risks: list[Risk]
     citations: list[str]
 
 
@@ -70,7 +72,7 @@ def _distance(price: Decimal, fact: Fact) -> Decimal:
 
 def _level_ok(p: LevelProposal, m: Materials, allowed: set[Decimal]) -> Decimal | None:
     parsed = parse_price(p.price)
-    if parsed is None:
+    if parsed is None or len(p.reason) > MAX_REASON:
         return None
     price = round_to_tick(parsed, m.asset_type)
     atr = m.atr
@@ -139,11 +141,20 @@ def validate_card(analysis: CardAnalysis | None, materials: Materials, local: di
         cited = set()
 
     allowed = base_allowed | _with_rounded({v["price"] for v in result["levels"].values()})
-    kept = [s for s in cited_sentences(analysis.summary) if _text_ok(s, m, allowed)]
+    kept = []
+    for sentence in cited_sentences(analysis.summary):
+        if not _text_ok(sentence, m, allowed):
+            continue
+        if len(" ".join([*kept, sentence])) > MAX_SUMMARY:
+            break  # cut at the last whole sentence that fits
+        kept.append(sentence)
     result["summary"] = " ".join(kept)
     cited |= set(TAG.findall(result["summary"]))
     for risk in analysis.risks:
-        if _text_ok(risk.text, m, allowed) and all(t in known for t in risk.basis):
+        if len(result["risks"]) == MAX_RISKS:
+            break
+        if (len(risk.text) <= MAX_RISK and _text_ok(risk.text, m, allowed)
+                and all(t in known for t in risk.basis)):
             result["risks"].append({"text": risk.text, "basis": list(risk.basis)})
             cited |= set(TAG.findall(risk.text)) | set(risk.basis)
 

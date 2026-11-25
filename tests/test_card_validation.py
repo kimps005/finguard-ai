@@ -237,3 +237,19 @@ def test_review_condition_is_not_an_order_in_card_text():
     text = "반드시 확인 후 매수 검토 구간입니다."
     assert validate_card(proposal(summary=text), M, LOCAL)["summary"] == text
     assert validate_card(proposal(low=("2982", ["P-2"], text)), M, LOCAL)["levels"]["low"]["source"] == "ai"
+
+
+def test_overlong_fields_are_trimmed_by_the_validator_not_the_schema():
+    long_reason = "지지 후보 " * 50  # 300 chars
+    long_risk = "위험 " * 50  # 150 chars
+    sentence = "[P-2] 지지선 부근에서 거래가 이어지는 흐름입니다. "  # 31 chars
+    analysis = proposal(
+        low=("2982", ["P-2"], long_reason), summary=sentence * 20,
+        risks=[Risk(text=long_risk, basis=["P-2"])] + [Risk(text=f"위험 {n}번", basis=["P-2"]) for n in "1234"])
+    card = validate_card(analysis, M, LOCAL)
+    # One overlong reason only sends that level to the local calculation.
+    assert sources(card) == {"low": "local", "high": "ai", "ceiling": "ai"}
+    # The summary keeps whole sentences up to 400 characters.
+    assert 0 < len(card["summary"]) <= 400 and card["summary"].endswith("흐름입니다.")
+    # The overlong risk is dropped and at most three valid risks are kept.
+    assert [r["text"] for r in card["risks"]] == ["위험 1번", "위험 2번", "위험 3번"]
