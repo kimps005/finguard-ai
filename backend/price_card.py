@@ -262,32 +262,36 @@ async def card_updates(market, stock_code: str):
     broker = market.broker
     now = broker.clock().astimezone(KST)
     key = CACHE_KEY.format(code=stock_code, session=confirmed_day(now).isoformat())
-    # Chat and the price-card screen may ask for one card at once. Uvicorn runs one worker, so an
-    # in-process lock lets the second caller wait for the first build and read it from the cache.
-    lock = card_locks.setdefault(key, asyncio.Lock())
-    async with lock:
-        async for update in _cached_or_built(market, stock, now, key):
-            yield update
+    if (card := await cached_card(broker, key)) is not None:
+        yield card
+        return
 
-
-async def _cached_or_built(market, stock, now, key):
-    broker, stock_code = market.broker, stock.stock_code
-    cached = await optional_data(broker.redis.get(key), 2)
-    if cached:
-        try:
-            card = restore(cached)
-        except Exception as exc:
-            logger.warning("Ignoring an unreadable cached price card (%s)", type(exc).__name__)
-        else:
-            yield card
-            return
-
-    # The local card goes out before news and DART lookups so the screen never waits on them.
+    # The local card goes out before news, DART and the lock so the screen never waits on them.
     holding, (band, facts) = await asyncio.gather(held_position(broker, stock_code),
                                                   chart_inputs(market, stock, now))
     local = local_levels(band)
     yield snapshot(now, band, facts, local_card(local))
 
+    # Chat and the price-card screen may ask for one card at once. Uvicorn runs one worker, so an
+    # in-process lock lets the second caller wait for the first build and read it from the cache.
+    async with card_locks.setdefault(key, asyncio.Lock()):
+        final = await cached_card(broker, key) or await built_card(market, stock, now, key, band, facts, holding)
+    yield final  # outside the lock: a slow consumer never holds up the next build
+
+
+async def cached_card(broker, key) -> dict | None:
+    cached = await optional_data(broker.redis.get(key), 2)
+    if not cached:
+        return None
+    try:
+        return restore(cached)
+    except Exception as exc:
+        logger.warning("Ignoring an unreadable cached price card (%s)", type(exc).__name__)
+        return None
+
+
+async def built_card(market, stock, now, key, band, facts, holding) -> dict:
+    broker, local = market.broker, local_levels(band)
     news, docs = await reference_inputs(market, stock, now)
     materials = build_materials(band, facts, news, docs, stock, holding)
 
@@ -304,7 +308,7 @@ async def _cached_or_built(market, stock, now, key):
         await broker.redis.set(key, dump(final), ex=ttl)
     except Exception as exc:
         logger.warning("Price card cache write failed (%s)", type(exc).__name__)
-    yield final
+    return final
 
 
 async def get_or_build_card(market, stock_code: str) -> dict:

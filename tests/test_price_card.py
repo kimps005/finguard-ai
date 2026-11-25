@@ -7,6 +7,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from backend import dart_rag, llm, price_card
 from backend.broker import KST, DailyBar, Holding, Quote
 from backend.card_validation import CardAnalysis, LevelProposal, Risk
@@ -274,6 +276,48 @@ def test_concurrent_builds_of_one_card_call_the_analyst_once(monkeypatch):
     assert [event for event, _ in parse(frames)] == ["status", "price_bands", "done"]
     # Whichever request waited got the other's cached card.
     assert json.loads(dump(card["band"])) == parse(frames)[-1][1]["band"]
+
+
+def test_waiting_for_another_build_never_delays_the_local_snapshot(monkeypatch):
+    slow = analyst()
+    build = slow.side_effect
+
+    async def scenario():
+        release = asyncio.Event()
+
+        async def invoke(*args, **kwargs):
+            await release.wait()  # the first build holds the lock until the analyst answers
+            return await build(*args, **kwargs)
+
+        slow.side_effect = invoke
+        first = card_updates(data, "005930")
+        assert (await first.__anext__())["band"]["ai_status"] == "local"
+        first_final = asyncio.create_task(first.__anext__())
+        while not slow.await_count:
+            await asyncio.sleep(0.01)
+
+        second = card_updates(data, "005930")
+        # (a) The second caller's local card arrives while the first build still holds the lock.
+        second_local = await asyncio.wait_for(second.__anext__(), 1)
+        assert second_local["band"]["ai_status"] == "local"
+        second_final = asyncio.create_task(second.__anext__())
+        await asyncio.sleep(0.05)
+        assert not second_final.done()
+
+        release.set()
+        finals = await first_final, await second_final
+        for updates in (first, second):
+            with pytest.raises(StopAsyncIteration):
+                await updates.__anext__()
+        return finals
+
+    patch(monkeypatch, slow)
+    data = card_market()
+    data.broker.redis = memory_redis({})
+    first_final, second_final = asyncio.run(scenario())
+    # (b) The waiting caller reads the first caller's cached card; the analyst ran once.
+    assert second_final == first_final and first_final["band"]["ai_status"] == "ai"
+    assert slow.await_count == 1
 
 
 def test_local_only_card_is_cached_briefly_even_when_analyst_answered(monkeypatch):
