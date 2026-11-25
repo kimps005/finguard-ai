@@ -205,6 +205,9 @@ def build_graph(market: MarketData):
                     report = answer_report(state, core, sources)
                 except llm.LLMUnavailable as exc:
                     warnings.append(f"답변 모델을 사용할 수 없어 로컬 정량 리포트를 제공합니다. [{exc.reason}]")
+                except Exception as exc:  # any other answer failure still ends with the local report
+                    logger.warning("Answer failed, using local report (%s)", type(exc).__name__)
+                    warnings.append("답변 모델을 사용할 수 없어 로컬 정량 리포트를 제공합니다. [응답 처리 오류]")
             parts = [report or diagnosis_report(state)]
         for part in parts:
             write({"text": part})

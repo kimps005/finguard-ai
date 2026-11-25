@@ -309,3 +309,18 @@ def test_llm_written_links_are_stripped_from_the_core_answer(monkeypatch):
     assert "evil.example" not in core and "](" not in core
     assert "[P-2] 20일선 95원을 지키는 조건입니다 공시 보기." in core
     assert "차트 흐름입니다." in core
+
+
+def test_unexpected_answer_error_streams_local_report_and_done_ok(monkeypatch, caplog):
+    market = setup_market(monkeypatch, [position()])
+
+    async def broken(state, account_numbers=()):
+        raise KeyError("private-detail")
+
+    monkeypatch.setattr(stock_analysis, "answer", broken)
+    frames = stream(market, "포트폴리오 위험 진단", "000001")
+    done = frames[-1][1]
+    assert frames[-1][0] == "done" and done["ok"] is True
+    assert "답변 모델을 사용할 수 없어 로컬 정량 리포트를 제공합니다. [응답 처리 오류]" in done["guardrail_warnings"]
+    assert "90/100" in done["final_report"]
+    assert "private-detail" not in str(frames) and "private-detail" not in caplog.text
