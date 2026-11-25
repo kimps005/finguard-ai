@@ -228,3 +228,47 @@ def test_etf_skips_disclosures_and_uses_5_won_tick(monkeypatch):
     data.etl.has_recent_chunks.assert_not_awaited()
     data.broker.get_daily_bars.assert_awaited_once_with(
         "069500", END - timedelta(days=120), END, asset_type="ETF")
+
+
+def memory_redis(store):
+    return SimpleNamespace(get=AsyncMock(side_effect=store.get),
+                           set=AsyncMock(side_effect=lambda k, v, ex: store.update({k: v})))
+
+
+def test_cache_hit_over_sse_still_ends_with_done(monkeypatch):
+    invoke = analyst()
+    patch(monkeypatch, invoke)
+    data = card_market()
+    data.broker.redis = memory_redis({})
+
+    first = parse(asyncio.run(collect(price_band_events(data, "005930"))))
+    second = parse(asyncio.run(collect(price_band_events(data, "005930"))))
+    assert [event for event, _ in first] == ["status", "price_bands", "done"]
+    assert [event for event, _ in second] == ["status", "price_bands", "done"]
+    assert second[-1][1]["ok"] is True
+    assert second[-1][1]["band"] == first[-1][1]["band"]
+    assert invoke.await_count == 1
+
+
+def test_local_only_card_is_cached_briefly_even_when_analyst_answered(monkeypatch):
+    # Every level cites a missing tag, so all three fail validation.
+    async def invoke(role, instruction, context, schema, *, timeout):
+        bad = LevelProposal(price="10050", basis=["P-1"], reason="[NEWS-99] 없는 기사")
+        return CardAnalysis(low=bad, high=bad, ceiling=bad, summary="", risks=[], citations=[])
+    patch(monkeypatch, AsyncMock(side_effect=invoke))
+    data = card_market()
+    final = asyncio.run(get_or_build_card(data, "005930"))
+    assert final["band"]["ai_status"] == "local"
+    assert card_ttl(NOW) > 600
+    assert data.broker.redis.set.await_args.kwargs["ex"] <= 600
+
+
+def test_malformed_cache_entry_rebuilds_the_card(monkeypatch):
+    invoke = analyst()
+    patch(monkeypatch, invoke)
+    data = card_market()
+    broken = json.dumps({"as_of": "x", "band": {"levels": [], "facts": []}})
+    data.broker.redis = memory_redis({"finguard:price-card:v1:005930:2026-11-20": broken})
+    snapshots = asyncio.run(collect(card_updates(data, "005930")))
+    assert len(snapshots) == 2 and snapshots[-1]["band"]["ai_status"] == "ai"
+    assert invoke.await_count == 1

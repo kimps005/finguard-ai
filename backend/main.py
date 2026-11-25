@@ -215,7 +215,7 @@ async def price_band_events(market, target_stock_code=None):
         yield sse("done", {"ok": False})
     except Exception as exc:
         logger.error("Short-term analysis stream failed (%s)", type(exc).__name__)
-        yield sse("error", {"message": "1개월 타점 분석을 완료할 수 없습니다."})
+        yield sse("error", {"message": "2주 가격 카드 분석을 완료할 수 없습니다."})
         yield sse("done", {"ok": False})
 
 

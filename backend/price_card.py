@@ -263,8 +263,8 @@ async def card_updates(market, stock_code: str):
     if cached:
         try:
             card = restore(cached)
-        except (ValueError, KeyError, TypeError, ArithmeticError):
-            logger.warning("Ignoring an unreadable cached price card")
+        except Exception as exc:
+            logger.warning("Ignoring an unreadable cached price card (%s)", type(exc).__name__)
         else:
             yield card
             return
@@ -285,8 +285,8 @@ async def card_updates(market, stock_code: str):
         logger.warning("Analyst card unavailable (%s)", exc.reason)
         analysis = None
     final = snapshot(now, band, facts, validate_card(analysis, materials, local))
-    # An outage card is kept briefly so the next selection retries the analyst.
-    ttl = card_ttl(now) if analysis is not None else min(card_ttl(now), SESSION_TTL)
+    # A local-only card is kept briefly so the next selection retries the analyst.
+    ttl = min(card_ttl(now), SESSION_TTL) if final["band"]["ai_status"] == "local" else card_ttl(now)
     try:
         await broker.redis.set(key, dump(final), ex=ttl)
     except Exception as exc:

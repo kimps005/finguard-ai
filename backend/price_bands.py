@@ -9,7 +9,7 @@ from backend.market_time import KST, confirmed_day
 
 
 logger = logging.getLogger(__name__)
-DISCLOSURE_QUERY = "향후 1개월 주가에 영향을 주는 실적, 주요 계약, 증자, 전환사채, 보호예수 공시"
+DISCLOSURE_QUERY = "향후 2주(10거래일) 주가에 영향을 주는 실적, 주요 계약, 증자, 전환사채, 보호예수 공시"
 LEVELS = ("buy", "sell", "ceiling")
 TARGET_LEVELS = dict(zip(LEVELS, ("buy_zone", "sell_zone", "peak_limit"), strict=True))
 
@@ -101,8 +101,13 @@ async def stock_price_band_updates(market, stock_code):
     """Selected-stock card: a local snapshot first, then the validated analyst card."""
     from backend.price_card import card_updates  # price_card builds on this module
 
+    count, last = 0, None
     async for snapshot in card_updates(market, stock_code):
+        count, last = count + 1, snapshot
         yield snapshot
+    if count == 1:
+        # A cache hit yields only the final card; main.py still needs a second frame for `done`.
+        yield last
 
 
 async def price_band_updates(market):

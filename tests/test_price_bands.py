@@ -220,3 +220,10 @@ def test_empty_candles_are_not_cached(monkeypatch):
         response = request_candles("/api/v1/stocks/005930/candles?interval=1d")
         assert response.status_code == 502
     assert broker.get_candle_history.await_count == 2 and broker.redis.values == {}
+
+
+def test_user_visible_wording_names_the_two_week_card(monkeypatch):
+    assert "향후 2주(10거래일)" in price_bands.DISCLOSURE_QUERY and "1개월" not in price_bands.DISCLOSURE_QUERY
+    monkeypatch.setattr(price_card, "fetch_stocks", AsyncMock(side_effect=RuntimeError("db down")))
+    events = parse(asyncio.run(collect(price_band_events(market(), "005930"))))
+    assert events[1:] == [("error", {"message": "2주 가격 카드 분석을 완료할 수 없습니다."}), ("done", {"ok": False})]
