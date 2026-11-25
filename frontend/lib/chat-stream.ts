@@ -53,6 +53,14 @@ interface PriceLevel {
   reason: string;
 }
 
+export type PriceSource = "ai" | "local";
+
+export interface StockPriceLevel extends PriceLevel {
+  current_pct: DecimalString;
+  source: PriceSource;
+  basis: string[];
+}
+
 interface BandIdentity {
   stock_code: string;
   name: string;
@@ -87,7 +95,14 @@ export interface StockSearchResult {
 
 export type StockPriceBand = Omit<Extract<PriceBand, { levels: object }>, "average_price" | "levels"> & {
   change_pct: DecimalString | null;
-  levels: Record<"buy_zone" | "sell_zone" | "peak_limit", PriceLevel & { current_pct: DecimalString }>;
+  levels: Record<"buy_zone" | "sell_zone" | "peak_limit", StockPriceLevel>;
+  horizon_sessions: number;
+  summary: string;
+  risks: { text: string; basis: string[] }[];
+  news: { alias: string; title: string; link: string }[];
+  facts: { id: string; label: string; value: DecimalString; upper: DecimalString | null; session: string | null }[];
+  ai_status: "ai" | "partial" | "local";
+  warnings: string[];
 };
 
 export interface StockPriceBands {

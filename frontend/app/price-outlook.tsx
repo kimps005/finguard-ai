@@ -3,12 +3,13 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { ExternalLink, RefreshCw, Search } from "lucide-react";
 import TossTenMinuteChart from "./toss-ten-minute-chart";
+import { ladderRows, sourceBadge } from "./price-card-rows";
 import {
   SessionExpired, streamChat, type DecimalString, type StockPriceBand,
   type StockPriceBands, type StockSearchResult,
 } from "../lib/chat-stream";
 
-const CACHE_PREFIX = "finguard-stock-outlook-v1:";
+const CACHE_PREFIX = "finguard-stock-outlook-v2:";
 export const WATCHLIST: StockSearchResult[] = [
   { stock_code: "005930", corp_name: "삼성전자", market: "KOSPI" },
   { stock_code: "000660", corp_name: "SK하이닉스", market: "KOSPI" },
@@ -30,6 +31,8 @@ export function signedPercent(value: DecimalString | null) {
   return nonzero ? `${value.startsWith("-") ? "" : "+"}${won.format(value)}%` : "0%";
 }
 
+const isWebLink = (link: string) => /^https?:\/\//.test(link);
+
 function readCache(code: string): StockPriceBands | null {
   try {
     const cached = JSON.parse(sessionStorage.getItem(CACHE_PREFIX + code) ?? "null");
@@ -41,14 +44,9 @@ function readCache(code: string): StockPriceBands | null {
 }
 
 function PriceLadder({ band }: { band: StockPriceBand }) {
-  const { buy_zone: buy, sell_zone: sell, peak_limit: ceiling } = band.levels;
+  const { buy_zone: buy, sell_zone: sell } = band.levels;
+  const rows = ladderRows(band);
   // Number() only positions marks on screen; every displayed value stays the backend's decimal string.
-  const rows = [
-    { key: "ceiling", label: "1개월 상단", hint: "단기적으로 넘기 어려운 가격", price: ceiling.price, pct: ceiling.current_pct, reason: ceiling.reason },
-    { key: "sell", label: "매도 추천가", hint: "이익 실현을 고려할 가격", price: sell.price, pct: sell.current_pct, reason: sell.reason },
-    { key: "current", label: "현재가", hint: "분석 시점", price: band.current_price, pct: null, reason: "" },
-    { key: "buy", label: "매수 추천가", hint: "분할 매수를 고려할 가격", price: buy.price, pct: buy.current_pct, reason: buy.reason },
-  ].sort((left, right) => Number(right.price) - Number(left.price));
   const values = rows.map(({ price }) => Number(price));
   const low = Math.min(...values);
   const span = Math.max(...values) - low || 1;
@@ -61,10 +59,10 @@ function PriceLadder({ band }: { band: StockPriceBand }) {
         {rows.map(({ key, price }) => <span key={key} className="ladder-mark" data-level={key} style={{ left: position(price) }} />)}
       </div>
       <ol className="ladder-rows">
-        {rows.map(({ key, label, hint, price, pct, reason }) => (
+        {rows.map(({ key, label, hint, price, pct, reason, source }) => (
           <li key={key} data-level={key}>
             <div className="ladder-label">
-              <strong>{label}</strong>
+              <strong>{label}{source && <em className="source-badge" data-source={source}>{sourceBadge(source)}</em>}</strong>
               <span>{hint}</span>
             </div>
             <div className="ladder-price">
@@ -75,12 +73,25 @@ function PriceLadder({ band }: { band: StockPriceBand }) {
           </li>
         ))}
       </ol>
+      {band.summary && <p className="card-summary">{band.summary}</p>}
+      {band.warnings.length > 0 && (
+        <ul className="card-warnings" aria-label="분석 안내">
+          {band.warnings.map((warning) => <li key={warning}>{warning}</li>)}
+        </ul>
+      )}
+      {band.risks.length > 0 && (
+        <section className="card-risks" aria-labelledby="risks-title">
+          <h3 id="risks-title">위험 요인</h3>
+          <ul>{band.risks.map((risk) => <li key={risk.text}>{risk.text}</li>)}</ul>
+        </section>
+      )}
     </div>
   );
 }
 
 function Evidence({ band }: { band: StockPriceBand }) {
-  if (band.ma20 === null && !band.recent_range && !band.flow && band.disclosures.length === 0) return null;
+  if (band.ma20 === null && !band.recent_range && !band.flow && band.disclosures.length === 0
+    && band.facts.length === 0 && band.news.length === 0) return null;
   return (
     <section className="evidence" aria-labelledby="evidence-title">
       <h3 id="evidence-title">판단 근거</h3>
@@ -95,6 +106,29 @@ function Evidence({ band }: { band: StockPriceBand }) {
           <div><dt>기관 5일 순매수</dt><dd data-direction={direction(band.flow.institution)}>{won.format(band.flow.institution)}주</dd></div>
         </>}
       </dl>
+      {band.facts.length > 0 && (
+        <dl className="evidence-facts" aria-label="차트 기준 가격">
+          {band.facts.map((fact) => (
+            <div key={fact.id}>
+              <dt>{fact.label}{fact.session && <small>{fact.session}</small>}</dt>
+              <dd>{won.format(fact.value)}원{fact.upper !== null && ` ~ ${won.format(fact.upper)}원`}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      {band.news.length > 0 && (
+        <ul className="evidence-docs" aria-label="관련 뉴스">
+          {band.news.filter((item) => isWebLink(item.link)).map((item) => (
+            <li key={item.alias}>
+              <a href={item.link} target="_blank" rel="noreferrer">
+                <span className="doc-alias">{item.alias}</span>
+                <span className="doc-title">{item.title}</span>
+                <ExternalLink size={14} aria-label="새 창에서 뉴스 열기" />
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
       {band.disclosures.length > 0 && (
         <ul className="evidence-docs" aria-label="DART 공시">
           {band.disclosures.map((doc) => (
@@ -354,7 +388,7 @@ export default function PriceOutlook({ pin, pinHeader, stock, onStockChange, onU
       <div className="outlook-body">
         <section aria-labelledby="ladder-title">
           <div className="block-head">
-            <h2 id="ladder-title">1개월 가격 구간</h2>
+            <h2 id="ladder-title">2주 가격 구간</h2>
             {band?.indicative && <p>변동폭 자료가 부족해 현재가 기준 참고 가격입니다.</p>}
           </div>
           {band ? <PriceLadder band={band} /> : (

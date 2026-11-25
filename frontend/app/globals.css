@@ -364,3 +364,14 @@ button.stock-row:hover { background: rgb(27 35 48 / .045); }
   *, *::before, *::after { animation-duration: 0s !important; animation-iteration-count: 1 !important; transition-duration: 0s !important; }
   .progress-track::after { width: 100%; transform: none; }
 }
+
+/* 2-week price card: source badges, summary, risks, facts */
+.source-badge { margin-left: 6px; padding: 1px 6px; border-radius: 999px; background: var(--paper); color: var(--muted); font-size: 11px; font-style: normal; font-weight: 600; vertical-align: 1px; }
+.source-badge[data-source="ai"] { background: var(--guard-tint); color: var(--ink); }
+.card-summary { max-width: 62ch; margin-top: 16px; color: var(--body); font-size: 14px; line-height: 1.7; }
+.card-warnings { display: grid; gap: 2px; margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.card-risks { margin-top: 16px; }
+.card-risks h3 { font-size: 14px; font-weight: 700; }
+.card-risks ul { display: grid; gap: 6px; margin-top: 8px; padding-left: 18px; list-style: disc; color: var(--body); font-size: 13px; line-height: 1.6; }
+.evidence-facts { margin-top: 12px; }
+.evidence-facts dt small { display: block; font-size: 11px; font-weight: 400; }
