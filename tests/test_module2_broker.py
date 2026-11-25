@@ -30,6 +30,9 @@ class MemoryRedis:
     async def set(self, key, value, *, ex):
         self.values[key] = (value, ex)
 
+    async def delete(self, key):
+        return int(self.values.pop(key, None) is not None)
+
     def lock(self, name, **kwargs):
         return self.locks.setdefault(name, asyncio.Lock())
 
@@ -126,6 +129,49 @@ def test_toss_snapshot_and_cash_use_documented_read_only_api(settings, monkeypat
     holding, = snapshot["holdings"]
     assert holding["profit_loss_pct"] == "25.11700" and holding["quantity"] == "2.5"
     assert holding["weight"] == "1" and holding["corp_code"] == "00123456"
+
+
+def toss_token_handler(tokens, accepted, paths):
+    def handle(request):
+        paths.append(request.url.path)
+        if request.url.path == "/oauth2/token":
+            return httpx.Response(200, json={"access_token": next(tokens), "expires_in": 3600})
+        if request.headers["Authorization"] != f"Bearer {accepted}":
+            return httpx.Response(401, json={"error": {"code": "token-revoked"}})
+        return httpx.Response(200, json={"result": [{"accountSeq": 7, "accountType": "BROKERAGE"}]})
+    return handle
+
+
+def test_toss_reissues_token_once_when_cached_token_is_revoked(settings):
+    redis, paths = MemoryRedis(), []
+
+    async def read():
+        handler = toss_token_handler(iter(["stale", "fresh"]), "fresh", paths)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            broker = BrokerConnector(settings, redis, http, account=toss_account(TossSettings("id", "secret")))
+            first = await broker.account._get("/api/v1/accounts")
+            second = await broker.account._get("/api/v1/accounts")
+            return first, second
+
+    first, second = asyncio.run(read())
+    assert first == second == [{"accountSeq": 7, "accountType": "BROKERAGE"}]
+    assert paths == ["/oauth2/token", "/api/v1/accounts", "/oauth2/token", "/api/v1/accounts", "/api/v1/accounts"]
+    cached, = redis.values.values()
+    assert json.loads(cached[0])["access_token"] == "fresh"
+
+
+def test_toss_reports_access_denied_when_reissued_token_is_also_rejected(settings):
+    paths = []
+
+    async def read():
+        handler = toss_token_handler(iter(["stale", "also-stale"]), "never", paths)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            broker = BrokerConnector(settings, MemoryRedis(), http, account=toss_account(TossSettings("id", "secret")))
+            await broker.account._get("/api/v1/accounts")
+
+    with pytest.raises(BrokerConfigurationError, match="toss_access_denied"):
+        asyncio.run(read())
+    assert paths == ["/oauth2/token", "/api/v1/accounts", "/oauth2/token", "/api/v1/accounts"]
 
 
 def test_toss_requires_account_selection_when_multiple_accounts_are_linked(settings):

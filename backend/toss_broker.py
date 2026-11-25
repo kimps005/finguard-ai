@@ -19,6 +19,13 @@ from backend.broker import (
 TOSS_API = "https://openapi.tossinvest.com"
 
 
+class TossTokenRejected(BrokerConfigurationError):
+    """401 on an API call: Toss keeps one live token per client and revokes older ones."""
+
+    def __init__(self):
+        super().__init__("toss_access_denied", "live")
+
+
 @dataclass(frozen=True)
 class TossSettings:
     client_id: str = field(repr=False)
@@ -52,6 +59,8 @@ class TossAccount:
         status = response.status_code
         if status in {408, 429} or status >= 500:
             raise RetryableBrokerError(f"Toss HTTP {status}")
+        if status == 401 and path != "/oauth2/token":
+            raise TossTokenRejected()
         if status in {401, 403} or (path == "/oauth2/token" and status == 400):
             raise BrokerConfigurationError("toss_access_denied", "live")
         if not response.is_success:
@@ -64,11 +73,16 @@ class TossAccount:
             raise BrokerError("Invalid Toss response object")
         return body
 
-    async def _token(self):
+    def _cache_key(self):
         settings = self.settings
         if not settings.client_id or not settings.client_secret:
             raise BrokerConfigurationError("toss_account_not_configured", "live")
         fingerprint = sha256(f"{settings.client_id}\0{settings.client_secret}".encode()).hexdigest()
+        return f"finguard:toss:oauth:{fingerprint}"
+
+    async def _token(self):
+        settings = self.settings
+        key = self._cache_key()
 
         async def issue():
             return await self._request("POST", "/oauth2/token", data={
@@ -77,13 +91,25 @@ class TossAccount:
                 "client_secret": settings.client_secret,
             })
 
-        return await self.connector._cached_oauth(f"finguard:toss:oauth:{fingerprint}", issue)
+        return await self.connector._cached_oauth(key, issue)
 
     async def _get(self, path, *, account_seq=None, params=None):
-        headers = {"Authorization": f"Bearer {await self._token()}"}
-        if account_seq is not None:
-            headers["X-Tossinvest-Account"] = account_seq
-        body = await self.connector._retry(lambda: self._request("GET", path, headers=headers, params=params))
+        async def send():
+            token = await self._token()
+            headers = {"Authorization": f"Bearer {token}"}
+            if account_seq is not None:
+                headers["X-Tossinvest-Account"] = account_seq
+            try:
+                return await self.connector._retry(
+                    lambda: self._request("GET", path, headers=headers, params=params))
+            except TossTokenRejected:
+                await self.connector._drop_oauth(self._cache_key(), token)
+                raise
+
+        try:
+            body = await send()
+        except TossTokenRejected:
+            body = await send()
         if "result" not in body:
             raise BrokerError("Toss response is missing result")
         return body["result"]

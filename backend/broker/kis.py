@@ -241,6 +241,20 @@ class BrokerConnector:
         except RedisError as exc:
             raise BrokerError("Broker OAuth Redis cache is unavailable") from exc
 
+    async def _drop_oauth(self, key, token):
+        """Forget a token the broker rejected, unless another request already replaced it."""
+        try:
+            async with self.redis.lock(key + ":refresh", timeout=120, blocking_timeout=35):
+                raw = await self.redis.get(key)
+                try:
+                    current = json.loads(raw)["access_token"] if raw else None
+                except (KeyError, ValueError, TypeError):
+                    current = token
+                if current == token:
+                    await self.redis.delete(key)
+        except RedisError as exc:
+            raise BrokerError("Broker OAuth Redis cache is unavailable") from exc
+
     async def _get(self, domain, credentials, path, transaction_id, params, continuation=""):
         token = await self._token(domain, credentials)
         headers = {
