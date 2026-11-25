@@ -485,6 +485,29 @@ def test_one_failing_source_degrades_only_its_holding(monkeypatch):
     assert "종목000002" in done["final_report"]
 
 
+def test_disclosure_search_failure_degrades_only_its_worker(monkeypatch):
+    # e.g. a laptop dGPU switched off: bge-m3 cannot load, but scores and the simulation still stand.
+    market = setup_market(monkeypatch, [position("000001", weight="0.3"), position("000002", weight="0.4")])
+
+    async def search(corp_code, query):
+        if corp_code.endswith("2"):
+            raise RuntimeError("DART RAG inference requires a CUDA GPU")
+        return [{"rcept_no": RECEIPT, "report_nm": "발행결정", "chunk_text": "희석률은 3.5%다."}]
+
+    dart_rag.search.side_effect = search
+
+    async def stream():
+        return [parse_frame(frame) async for frame in chat_events(build_graph(market), "포트폴리오 위험 진단")]
+
+    events = asyncio.run(stream())
+    event, done = events[-1]
+    assert event == "done" and done["ok"] is True
+    assert [row["stock_code"] for row in done["verified_stock_results"]] == ["000002", "000001"]
+    assert "000002 종목 공시 검색을 사용할 수 없어 공시 근거 없이 분석했습니다." in done["guardrail_warnings"]
+    assert not any(w.startswith("000001 종목 공시 검색") for w in done["guardrail_warnings"])
+    assert done["final_report"]
+
+
 def test_slow_dart_ingest_is_bounded(monkeypatch):
     market = setup_market(monkeypatch, [position("000001")])
     monkeypatch.setattr(portfolio_market, "INGEST_TIMEOUT", 0.05)

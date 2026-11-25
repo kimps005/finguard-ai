@@ -1,6 +1,7 @@
 """Stock-local evidence, structured LLM output and sentence-level citation verification."""
 
 import asyncio
+import logging
 import re
 from typing import Annotated
 
@@ -10,6 +11,8 @@ from backend import dart_rag, llm
 from backend.citations import ALIAS, CITATION_MARK, RECEIPT, AliasBook
 from backend.serialization import dump
 
+
+logger = logging.getLogger(__name__)
 
 ANSWER_HEADING = "### 핵심 답변"
 EVIDENCE_HEADING = "### 판단 근거"
@@ -45,10 +48,19 @@ async def analyze(context):
     return answer.model_dump()
 
 
+async def disclosure_chunks(corp_code, query):
+    """A missing GPU, model or index degrades this worker to no disclosures, not the whole report."""
+    try:
+        return await dart_rag.search(corp_code, query), False
+    except Exception as exc:  # CancelledError is not an Exception and still propagates.
+        logger.warning("Disclosure search unavailable (%s)", type(exc).__name__)
+        return [], True
+
+
 async def analyze_stock(job, external):
     stock = job["stock"]
-    chunks, news = await asyncio.gather(
-        dart_rag.search(stock["corp_code"], job["query"]),
+    (chunks, rag_unavailable), news = await asyncio.gather(
+        disclosure_chunks(stock["corp_code"], job["query"]),
         external.get_news(job.get("corp_name") or stock["name"]))
     book = AliasBook()
     documents = [book.document(row) for row in chunks]
@@ -56,7 +68,7 @@ async def analyze_stock(job, external):
     for event in job["events"]:
         book.alias(event["rcept_no"])
     result = {"stock_code": stock["stock_code"], "doc_map": book.doc_map(),
-              "disclosures": documents, "news": news}
+              "disclosures": documents, "news": news, "rag_unavailable": rag_unavailable}
     try:
         return {**await analyze(dump(cloud_context(stock, job["scorecard"], documents))), **result}
     except llm.LLMUnavailable as exc:
@@ -123,6 +135,8 @@ def cited_sentences(text):
 def verify_results(raw, *, preserve_aliases=False):
     verified, warnings = [], []
     for row in raw:
+        if row.get("rag_unavailable"):
+            warnings.append(f"{row['stock_code']} 종목 공시 검색을 사용할 수 없어 공시 근거 없이 분석했습니다.")
         if row.get("llm_unavailable"):
             reason = row.get("llm_failure_reason", "LLM 호출 오류")
             warnings.append(f"{row['stock_code']} 종목 LLM을 사용할 수 없어 정량 결과와 근거 공시를 제공합니다. [{reason}]")
