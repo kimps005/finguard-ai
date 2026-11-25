@@ -8,7 +8,7 @@ from typing import Annotated
 from pydantic import BaseModel, StringConstraints, ValidationError
 
 from backend import dart_rag, llm
-from backend.citations import ALIAS, CITATION_MARK, RECEIPT, AliasBook
+from backend.citations import ALIAS, CITATION_MARK, RECEIPT, TAG, TAG_MARK, AliasBook
 from backend.serialization import dump
 
 
@@ -111,7 +111,9 @@ def cited_sentences(text):
     # Mask markers at equal width, then slice the original at Kiwi's end offsets.
     if not text.strip():
         return
-    masked = CITATION_MARK.sub(lambda m: " " * len(m[0]), text)
+    masked = text
+    for mark in (CITATION_MARK, TAG_MARK, TAG):
+        masked = mark.sub(lambda m: " " * len(m[0]), masked)
     sentences = dart_rag._kiwi().split_into_sents(masked)
     start = 0
     for sentence in sentences[:-1]:
