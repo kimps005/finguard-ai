@@ -35,7 +35,8 @@ def database(tmp_path_factory):
             try:
                 conn.execute(f"SET search_path TO {schema}, public")
                 # 004 runs twice to prove the migration is idempotent.
-                for migration in ["001_module1.sql", "004_module4.sql", "004_module4.sql", "005_stock_market.sql"]:
+                for migration in ["001_module1.sql", "004_module4.sql", "004_module4.sql", "005_stock_market.sql",
+                              "006_price_card_log.sql"]:
                     conn.execute((MIGRATIONS / migration).read_text(encoding="utf-8"))
                 yield dsn, schema
             finally:
@@ -57,5 +58,15 @@ def db(database, monkeypatch):
     monkeypatch.setattr(psycopg.AsyncConnection, "connect", connect_test)
     with psycopg.connect(dsn, autocommit=True, prepare_threshold=None) as conn:
         conn.execute(f"SET search_path TO {schema}, public")
-        conn.execute("TRUNCATE stock_master, dart_chunks, overhang_events")
+        conn.execute("TRUNCATE stock_master, dart_chunks, overhang_events, price_card_log")
         yield conn
+
+
+@pytest.fixture(autouse=True)
+def no_card_log(monkeypatch):
+    """Price-card tests never write the log; test_card_log.py replaces this with its own spy."""
+    from unittest.mock import AsyncMock
+
+    from backend import price_card
+
+    monkeypatch.setattr(price_card, "record_card", AsyncMock())

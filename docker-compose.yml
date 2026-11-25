@@ -76,6 +76,7 @@ services:
       - ./data/postgres:/var/lib/postgresql/data
       - ./backend/migrations/001_module1.sql:/docker-entrypoint-initdb.d/001_module1.sql:ro
       - ./backend/migrations/004_module4.sql:/docker-entrypoint-initdb.d/004_module4.sql:ro
+      - ./backend/migrations/006_price_card_log.sql:/docker-entrypoint-initdb.d/006_price_card_log.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 5s

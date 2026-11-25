@@ -251,7 +251,7 @@ class DartETL:
 def migrate():
     migrations = Path(__file__).with_name("migrations")
     with psycopg.connect(autocommit=True) as conn:
-        for name in ("004_module4.sql", "005_stock_market.sql"):
+        for name in ("004_module4.sql", "005_stock_market.sql", "006_price_card_log.sql"):
             conn.execute((migrations / name).read_text(encoding="utf-8"))
 
 

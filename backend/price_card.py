@@ -8,6 +8,7 @@ import logging
 from weakref import WeakValueDictionary
 
 from backend import dart_rag, llm
+from backend.card_log import record_card
 from backend.card_validation import CardAnalysis, Materials, validate_card
 from backend.chart_levels import Fact, chart_facts
 from backend.citations import AliasBook, mask_receipts
@@ -308,6 +309,10 @@ async def built_card(market, stock, now, key, band, facts, holding) -> dict:
         await broker.redis.set(key, dump(final), ex=ttl)
     except Exception as exc:
         logger.warning("Price card cache write failed (%s)", type(exc).__name__)
+    # The log feeds the hit-rate script only; a database failure never reaches the stream.
+    model = "local" if final["band"]["ai_status"] == "local" else llm.model_name("analyst")
+    await optional_data(record_card(stock.stock_code, confirmed_day(now), final["band"], local, materials.atr,
+                                    model), 3)
     return final
 
 
