@@ -40,7 +40,7 @@
 
   1. **단순 조회 (Fast Path):** *"내 잔고랑 현재가 얼마야?"* 요청 시 Router가 `fast_lookup`으로 판별, DART/RAG/ETL을 우회하고 `Fast Quote Node`에서 증권사 잔고·현재가만 단일 조회한 뒤 1.0초 이내 스트리밍 시작.
 
-  2. **원클릭 종합 리스크 스캔 (Warm/Cold Path):** *"내 계좌 지금 위험한 거 없어?"* 요청 시 Router가 `deep_diagnosis`로 판별, 비중 상위 Top-N 워커의 공시 분석과 로컬에서 계산한 미상환 CB 희석률·수집한 뉴스 제목을 리포트에서 종목별로 브리핑 (우선주는 보통주 공시 추적, ETF/ETN은 공시·재무 단계를 우회하여 수급·수익률 브리핑).
+  2. **원클릭 종합 리스크 스캔 (Warm/Cold Path):** *"내 계좌 지금 위험한 거 없어?"* 요청 시 Router가 `deep_diagnosis`로 판별, 비중 상위 Top-N 종목의 가격 카드·공시 근거와 로컬에서 계산한 미상환 CB 희석률·수집한 뉴스 제목을 리포트에서 종목별로 브리핑 (우선주는 보통주 공시 추적, ETF/ETN은 공시·재무 단계를 우회하여 수급·수익률 브리핑).
 
   3. **이벤트·공시 맞춤형 영향도 정밀 진단:** *"보유 중인 A 종목 최근 전환사채 발행이랑 보호예수 해제가 내 평단가 기준으로 얼마나 위험해?"* 요청 시 원문 조항과 `overhang_events` 캐싱 데이터를 결합하여 대응 전략 제시.
 
@@ -72,13 +72,17 @@
 
 | 역할 | 모델 환경변수와 기본값 | 제공자 |
 | --- | --- | --- |
-| Node 1 의도 분류 | `ROUTER_MODEL=qwen3.7-plus` | Alibaba Cloud Model Studio (DashScope) |
-| Node 4 Top-N 종목 분석 | `WORKER_MODEL=qwen3.8-flash` | DashScope |
-| Node 6 종합 진단 및 Module 8 RAGAS Judge | `SYNTHESIZER_MODEL=gemini-3.8-flash` | Google AI Studio (Gemini API) |
+| 가격 카드 분석가 (선택 종목 2주 저점·고점·상단) | `ANALYST_MODEL=qwen3.7-plus` | Alibaba Cloud Model Studio (DashScope) |
+| Node 6 채팅 질문 답변 | `ANSWER_MODEL=qwen3.8-flash` | DashScope |
+| 장애 대체 (분석가·답변 공통) | `FALLBACK_MODEL=gemini-3.8-flash` | Google AI Studio (Gemini API) |
+| Module 8 RAGAS Judge | `JUDGE_MODEL=gemini-3.8-flash` | Google AI Studio (Gemini API) |
 
-* DashScope는 `DASHSCOPE_API_KEY` 및 `DASHSCOPE_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1`로 접속한다. 429, 403 또는 할당량 소진 시 즉시 같은 입력으로 Gemini를 한 번 호출한다. Gemini는 `GEMINI_API_KEY`를 사용한다.
-* Workers와 Synthesizer는 종목명, 포트폴리오 비중(%), 수익률(%), 100점 스코어카드 점수, DOC-N 별칭이 붙은 DART 공시 청크만 받는다. 계좌번호, 보유 수량, 원화 평가액·예수금, 자유 입력 질문과 시뮬레이션 결과는 이 프롬프트에서 제외한다. 뉴스·거시 지표는 로컬 리포트에서 결합한다.
-* 키 미설정, 네트워크 또는 한도 오류 시 Router는 로컬 의도 분류를 사용한다. 단순 조회 후보는 첫 토큰 예산을 위해 라우터 대기를 250ms로 제한한다. 워커 장애는 종목별로 격리한다. 종합 노드까지 실패해도 Python의 100점 스코어카드·희석률·시뮬레이션 및 종목별 DOC-N 근거 공시 목록을 경고 배너와 함께 반환한다. SSE는 `status → token → done(ok=true)`로 완료한다.
+* DashScope는 `DASHSCOPE_API_KEY` 및 `DASHSCOPE_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1`로 접속한다. 429·403·할당량 소진, 시간초과, 5xx 시 즉시 같은 입력으로 Gemini를 한 번 호출하고 Gemini도 실패하면 로컬 결과를 낸다. Gemini는 평소 호출하지 않으며 `GEMINI_API_KEY`를 사용한다.
+* **분석가 입력:** 일봉 지표 `[P-n]`(5·20·60일선, 스윙 저점·고점, 매물대, ATR14, 현재가), 최근 5거래일 외국인·기관 순매수, 뉴스 `[NEWS-n]`, 공시 `[DOC-n]`, 보유 종목이면 평단가·비중·수익률. 출력은 `low`·`high`·`ceiling` 가격과 근거 번호, 이유, 카드 설명, 이벤트 위험이다.
+* **분석가 출력 검증 (레벨별):** 가격은 `Decimal` 양의 정수이며 KRX 호가 단위로 반올림한다. `low ≤ 현재가 ≤ ceiling`, `low < high ≤ ceiling` 순서를 지켜야 하고, 순서가 깨지면 세 레벨 모두 로컬 값을 쓴다. 현재가와의 차이는 `4 × ATR14` 이내여야 한다. `basis`에 실제 존재하는 `[P-n]`이 하나 이상 있어야 하며, 인용 지표값에서 `max(1 × ATR14, 3%)`보다 멀면 `[NEWS-n]`·`[DOC-n]` 인용이 필요하고 `2 × ATR14`를 넘으면 거부한다. 존재하지 않는 번호·14자리 공시번호가 있는 문장, `원·주·%` 숫자가 재료에 없는 문장은 Drop한다. 실패한 레벨만 로컬 계산값(`source: "local"`)으로 대체하고 통과한 레벨은 `source: "ai"`로 표시한다.
+* **답변 모델 입력:** 질문 원문(계좌번호 형태의 숫자는 "(계좌번호 생략)"로 마스킹), 종목별 이름·코드·수량·평단가·현재가·비중·수익률, 예수금·총평가액, 대상 종목의 검증된 가격 카드, 재료(`[P-n]`·`[NEWS-n]`·마스킹한 DOC-N 공시 청크, 뉴스 제목·요약), 로컬 시뮬레이션 결과. **보내지 않는 것:** 계좌번호, 증권사·외부 API 키와 토큰, PIN, 기타 자격증명.
+* **답변 검증:** `### 핵심 답변` / `### 판단 근거` 형식을 확인한다. 미등록 태그·14자리 번호가 있는 문장, 입력에 없는 `원·주·%` 숫자가 있는 문장, 확정 매수·매도 지시 문장은 Drop하고 경고를 단다. 조건부 판단은 허용한다.
+* 키 미설정, 네트워크 또는 한도 오류 시 LLM 라우터는 없으며 의도 분류는 로컬 정규식이 맡는다. 분석가 장애는 로컬 카드, 답변 장애는 Gemini 한 번 후 로컬 `diagnosis_report`로 처리한다. 종합 노드까지 실패해도 Python의 100점 스코어카드·희석률·시뮬레이션 및 종목별 DOC-N 근거 공시 목록을 경고 배너와 함께 반환한다. SSE는 `status → token → done(ok=true)`로 완료한다.
 
 ### 3.2 종목 식별자 통합 매핑 & 오버행 DB 스키마
 
@@ -178,7 +182,7 @@ CREATE TABLE overhang_events (
                      [User Query] (Next.js PIN 검증 완료)
                           │
                           ▼
-                 [1. Router Node · qwen3.7-plus]
+                 [1. Router Node · 로컬 정규식, LLM 없음]
                   │              │
      (fast_lookup)│              │(deep_diagnosis / simulation)
                   ▼              ▼
@@ -191,17 +195,17 @@ CREATE TABLE overhang_events (
                   │              │
                   │              ▼
                   │     [4. Integrated Top-N Stock Fan-Out (Send API)]
-                  │     ├── Stock Worker 1 (qwen3.8-flash · 허용 지표 + DOC-N 청크 분석, doc_map 캡슐화)
-                  │     ├── Stock Worker 2 (qwen3.8-flash · 허용 지표 + DOC-N 청크 분석, doc_map 캡슐화)
+                  │     ├── Stock Worker 1 (대상 종목 가격 카드 획득: 캐시 또는 분석가 qwen3.7-plus, doc_map 캡슐화)
+                  │     ├── Stock Worker 2 (대상 종목 가격 카드 획득: 캐시 또는 분석가 qwen3.7-plus, doc_map 캡슐화)
                   │     └── (대상 0개 시 "synthesizer_node" 엣지 우회 반환)
                   │              │
                   │              ▼
                   │     [5. Structured Guardrail Node]
-                  │     (kiwi.split_into_sents() 문장 분리 → doc_map 역매핑 → 실패 문장 Drop 후 verified_stock_results 기록)
+                  │     (카드 검증 결과와 kiwi.split_into_sents() 문장 분리 → doc_map 역매핑 → 실패 문장 Drop 후 verified_stock_results 기록)
                   │              │
                   └──────────────┴────────┐
                                           ▼
-                               [6. Fast Quote / Synthesizer · gemini-3.8-flash]
+                               [6. Fast Quote / Synthesizer · 답변 qwen3.8-flash → 대체 gemini-3.8-flash → 로컬 리포트]
                                (Next.js로 SSE 스트리밍 출력)
 ```
 
@@ -296,6 +300,10 @@ class PortfolioState(TypedDict):
 
    * **목표 지표:** Faithfulness $\ge 0.90$, Context Precision $\ge 0.85$, 정형 수치 오차율 $0.0\%$.
 
+   * **평가 대상:** 채팅 답변 모델(`ANSWER_MODEL`)의 최종 답변이며 Judge는 `JUDGE_MODEL`이다. `--answer-model`로 Qwen 3.8-flash와 Gemini 3.8-flash를 같은 데이터셋에서 비교하며, 결과에 `answer_model`·`judge_model`과 대체 모델 응답 건수(`provider_fallbacks`)를 기록해 대체 응답이 다른 모델 몫으로 집계되지 않게 한다. 결정론 지표(수치 오차율)를 우선하고 Judge가 Gemini라는 편향을 감안한다.
+
+3. **2주 가격 카드 적중률 (Module 8):** 선택 종목 카드를 `price_card_log`에 종목·기준일당 한 행으로 기록하고(AI 값과 같은 날 로컬 값 병기), 10거래일이 지나면 `scripts/score_price_cards.py`가 실제 고가·저가로 저점 유지(기간 최저가 ≥ low × 0.99), 고점 도달(기간 최고가 ≥ high), 상단 유지(기간 최고가 ≤ ceiling)를 AI 카드와 로컬 카드로 나눠 채점한다. 미완성 봉은 제외한다.
+
 ## 7. 기능 단위 개발 로드맵 (8개 독립 모듈)
 
 개발 시 단일 모듈 완성 후 `Git Commit` $\rightarrow$ `/clear` 실행 원칙을 준수하여 컨텍스트 오염을 방지한다.
@@ -307,9 +315,9 @@ class PortfolioState(TypedDict):
 | **Module 3** | **결정론적 금융 연산 Engine** | Trailing PER/PBR, 동일 `fs_div` 쌍 & XBRL `account_id` 기반 4분기 역산, ETF 우회 처리, 물타기 시뮬레이터, 100점 정량 스코어카드 Engine | `pytest tests/test_finance_calc.py` 100% 통과 (수치 오차 0%) $\rightarrow$ Commit & `/clear` | 
 | **Module 4** | **DART ETL & `kiwipiepy` RAG** | `overhang_events` `NULLS NOT DISTINCT` Upsert, Markdown 표 청킹, `TSVECTOR` GIN `ts_rank` + `corp_code` Exact Scan, PyTorch FP16 `bge-m3`/`bge-reranker-v2-m3` `gpu_semaphore(1)` | `overhang_events` 기재정정 중복 방지 및 VRAM 2.2GB 이내 Exact Scan 검색 확인 $\rightarrow$ Commit & `/clear` | 
 | **Module 5** | **외부 데이터 커넥터 3종** | 금융위 의무보호예수 API (`isin_cd` 및 Fallback), 네이버 뉴스 API, ECOS 환율/금리 API (`macro_context` 채우기) | 비동기 수집 및 Redis 캐싱 확인, 보호예수 Fallback 검증 $\rightarrow$ Commit & `/clear` | 
-| **Module 6** | **LangGraph 멀티 에이전트** | `PortfolioState`(`verified_stock_results` 분리), `Fast Quote Node` 경량 분기, Top-N 통합 워커 Fan-Out (0개 시 우회 분기), `kiwi.split_into_sents()` Guardrail & Drop | Plan Mode로 구조 확정. Fast Path $< 1.0\text{s}$, empty Fan-Out 무사통과 및 `DOC-N` 문장 단위 Drop, 마스킹, Gemini 전환, LLM 전면 장애 시 정상 SSE 완료 검증 $\rightarrow$ Commit & `/clear` |
+| **Module 6** | **LangGraph 멀티 에이전트 · 2주 가격 카드** | `PortfolioState`(`verified_stock_results` 분리), 로컬 정규식 Router, `Fast Quote Node` 경량 분기, 대상 종목 가격 카드 획득 Fan-Out (0개 시 우회 분기), 분석가(Qwen 3.7-plus) 카드 검증·캐시, 답변 모델(Qwen 3.8-flash) 질문 직접 답변, `kiwi.split_into_sents()` Guardrail & Drop | Plan Mode로 구조 확정. Fast Path $< 1.0\text{s}$, empty Fan-Out 무사통과 및 `DOC-N` 문장 단위 Drop, 마스킹, Gemini 전환(429·403·할당량·시간초과·5xx), 분석가 검증 실패 시 로컬 대체, LLM 전면 장애 시 정상 SSE 완료 검증 $\rightarrow$ Commit & `/clear` |
 | **Module 7** | **Next.js 14 대시보드 & 보안** | Next.js 14 App Router 대시보드 UI, Next.js PIN 프록시 Route Handler, SSE 스트리밍 연동 | PIN 검증, 무인증 통신 차단 및 브리핑 마크다운 스트리밍 확인 $\rightarrow$ Commit & `/clear` | 
-| **Module 8** | **RAGAS 평가 & README** | Gemini Judge로 5대 이벤트별 20건 RAGAS 평가 스크립트 실행, Warm/Cold Latency 벤치마크 측정, `README.md` 작성 | `README.md` 내 Mermaid 다이어그램 및 RAGAS 정량 지표 수치 기록 |
+| **Module 8** | **RAGAS 평가 & README** | Gemini Judge로 5대 이벤트별 20건 RAGAS 평가(답변 모델별 `--answer-model` 비교), 가격 카드 기록(`006_price_card_log.sql`)과 10거래일 적중률 채점(`scripts/score_price_cards.py`), Warm/Cold Latency 벤치마크 측정, `README.md` 작성 | `README.md` 내 Mermaid 다이어그램 및 RAGAS 정량 지표 수치 기록 |
 
 ## 8. AI 에이전트 교대 개발 가이드라인 (Codex & Claude Code 협업 규칙)
 
@@ -331,7 +339,7 @@ class PortfolioState(TypedDict):
 - Process Concurrency: Uvicorn MUST run with `workers=1` (Single-Tenant VRAM protection).
 
 ## 3. Mandatory Engineering Rules
-- Cloud models: use DashScope for Node 1/4 and Gemini for Node 6 and the RAGAS judge. Follow section 3.1 for quotas, the outbound field allowlist and deterministic reports during outages.
+- Cloud models: use DashScope Qwen for the price-card analyst (`ANALYST_MODEL`) and chat answers (`ANSWER_MODEL`); Gemini only as fallback (`FALLBACK_MODEL`) and RAGAS judge (`JUDGE_MODEL`). There are no router or worker LLM calls. Follow section 3.1 for fallback triggers, the outbound field rules and deterministic reports during outages.
 - Model Loading: NEVER use `fastembed`. ALWAYS use `sentence-transformers` & `CrossEncoder` with `torch.float16` for `BAAI/bge-m3` and `BAAI/bge-reranker-v2-m3`.
 - Financial Calculations: ALWAYS use Python `decimal.Decimal` (No `float` rounding errors).
 - DB Schema: Respect `UNIQUE NULLS NOT DISTINCT` on `overhang_events` and `crno`-based `corp_code` inheritance for preferred stocks (`stock_master`).

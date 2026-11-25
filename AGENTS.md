@@ -13,9 +13,9 @@
 - 기본 명세는 `docs/finguard_ai_prd_v3.8.md`다. 구현 전에 해당 모듈의 요구사항과 완료 기준을 읽고 모듈 범위를 지킨다.
 - `overhang_events`의 `UNIQUE NULLS NOT DISTINCT` 복합키와 `stock_master`의 `crno` 기반 우선주 `corp_code` 전파 규칙을 유지한다.
 - LangGraph Fan-Out 대상이 비어 있으면 문자열 `"synthesizer_node"`를 반환한다. `verified_stock_results`에는 `operator.add` 리듀서를 추가하지 않는다.
-- Node 1은 `ROUTER_MODEL=qwen3.7-plus`, Node 4는 `WORKER_MODEL=qwen3.8-flash`를 사용한다. DashScope의 429·403·할당량 오류는 즉시 Gemini로 전환한다.
-- Node 6 및 RAGAS Judge는 `SYNTHESIZER_MODEL=gemini-3.8-flash`를 사용한다. `DASHSCOPE_API_KEY`, `DASHSCOPE_BASE_URL`, `GEMINI_API_KEY`의 실제 값은 로컬 `.env`에 설정한다. [모델 배치도와 환경변수 표](README.md#langgraph-워크플로우)
-- Workers·Synthesizer의 외부 입력은 종목명·비중(%)·수익률(%)·정량 점수·DOC-N 공시 청크로 제한한다. LLM 전면 장애에도 로컬 점수·희석률·시뮬레이션·근거 목록과 경고를 SSE로 반환한다.
+- 가격 카드 분석가는 `ANALYST_MODEL=qwen3.7-plus`, 채팅 답변은 `ANSWER_MODEL=qwen3.8-flash`를 사용한다. 라우터·워커 LLM 호출은 없으며 의도 분류는 로컬 정규식이다.
+- `FALLBACK_MODEL=gemini-3.8-flash`는 DashScope의 429·403·할당량 오류, 시간초과, 5xx에서 한 번만 호출하고 그래도 실패하면 로컬 결과를 낸다. RAGAS Judge는 `JUDGE_MODEL=gemini-3.8-flash`를 사용한다. `DASHSCOPE_API_KEY`, `DASHSCOPE_BASE_URL`, `GEMINI_API_KEY`의 실제 값은 로컬 `.env`에 설정한다. [모델 배치도와 환경변수 표](README.md#langgraph-워크플로우)
+- 분석가·답변 모델의 외부 입력은 질문(계좌번호 형태 숫자는 "(계좌번호 생략)"로 마스킹)·종목명·코드·수량·평단가·현재가·비중·수익률·예수금·총평가액·가격 카드·재료([P-n]·[NEWS-n]·DOC-N 공시 청크)·로컬 시뮬레이션으로 제한한다. 계좌번호, API 키·토큰, PIN은 보내지 않는다. 미등록 태그·14자리 번호·입력에 없는 숫자·확정 매수/매도 지시 문장은 Drop한다. LLM 전면 장애에도 로컬 점수·희석률·시뮬레이션·근거 목록과 경고를 SSE로 반환한다.
 - KIS 실전 계좌는 `IS_VIRTUAL=false`와 실전 자격증명을 사용한다. 모의 계좌용 `KIS_VIRTUAL_*`는 선택 사항이다.
 - PRD의 핵심 아키텍처를 변경해야 할 때는 개발자와 먼저 논의한다.
 

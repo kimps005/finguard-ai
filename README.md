@@ -22,7 +22,7 @@
 3. 완성된 리포트의 "### 핵심 답변 / ### 판단 근거" 섹션. [DOC-N] 링크가 DART 원문으로 연결되는 부분을 포함합니다.
 4. DASHSCOPE_API_KEY와 GEMINI_API_KEY를 비운 상태에서 같은 질의를 실행한 화면.
    경고 배너와 함께 로컬 스코어카드·희석률이 그대로 나오는 장면은 장애 격리 설계를 보여 줍니다.
-5. 종목 검색 → 1개월 가격 밴드(매수·차익 실현·상단 저항) 카드와 10분봉 캔들 차트.
+5. 종목 검색 → 2주 가격 카드(단기 저점·단기 고점·2주 상단, AI/기본 계산 배지)와 10분봉 캔들 차트.
 -->
 <!-- ![대시보드 데모](docs/images/demo.gif) -->
 
@@ -80,7 +80,7 @@ flowchart LR
 
     subgraph API["FastAPI · Uvicorn workers=1"]
         Graph["LangGraph 진단 그래프"]
-        Bands["1개월 가격 밴드 스트림"]
+        Bands["2주 가격 카드 스트림"]
         Candles["캔들 API<br/>키별 Lock + Redis 캐시"]
         ETL["DartETL<br/>공시 인제스트 · 오버행 Upsert"]
         RAG["dart_rag<br/>하이브리드 검색"]
@@ -103,8 +103,8 @@ flowchart LR
     end
 
     subgraph LLM["LLM 공급자"]
-        Qwen["DashScope Qwen<br/>Router · Worker"]
-        Gemini["Gemini<br/>Synthesizer · 대체 호출"]
+        Qwen["DashScope Qwen<br/>분석가 · 답변"]
+        Gemini["Gemini<br/>대체 호출 · Judge"]
     end
 
     UI -->|"POST /api/chat"| Proxy
@@ -141,18 +141,18 @@ flowchart TD
     dashboard["Next.js 대시보드"] -->|"POST /api/chat · X-App-Pin"| proxy["Next.js PIN 검증 및 SSE 프록시"]
     proxy -->|"POST /api/v1/chat/stream · user_query"| http["FastAPI chat_events"]
     http --> startNode(["START"])
-    startNode --> router["Router · qwen3.7-plus"]
+    startNode --> router["router_node · 로컬 정규식, LLM 없음"]
     router -->|"fast_lookup"| fastQuote["fast_quote_node · 증권사 잔고 조회"]
     router -->|"deep_diagnosis / simulation"| market["market_data_node · 보유 종목 시장 데이터, ECOS, DART 동기 인제스트"]
     market --> quant["quant_scorecard_node · Decimal 스코어카드 및 선택적 매수 시뮬레이션"]
     quant --> fanOut["fan_out_node"]
-    fanOut -->|"Command · Send × 최대 3"| stockWorker["Stock Worker · qwen3.8-flash · DOC-N 공시 분석"]
-    stockWorker -->|"stock_analysis_results · 병렬 누적"| guardrail["guardrail_node · 검증 및 verified_stock_results 기록"]
-    guardrail --> synthesizer["Synthesizer · gemini-3.8-flash + 로컬 정량 리포트"]
+    fanOut -->|"Command · Send × 최대 3"| stockWorker["Stock Worker · 대상 종목 가격 카드 획득 · 캐시 또는 분석가 qwen3.7-plus"]
+    stockWorker -->|"stock_analysis_results · 병렬 누적"| guardrail["guardrail_node · 카드 검증 및 verified_stock_results 기록"]
+    guardrail --> synthesizer["Synthesizer · 답변 qwen3.8-flash + 로컬 정량 리포트"]
     fanOut -->|"대상 0건 · synthesizer_node"| synthesizer
     fastQuote -->|"로컬 조회 리포트"| synthesizer
-    router -.->|"403 / 429 / 할당량 소진"| fallback["Gemini 대체 호출"]
-    stockWorker -.->|"403 / 429 / 할당량 소진"| fallback
+    stockWorker -.->|"403 / 429 / 할당량 · 시간초과 · 5xx"| fallback["Gemini 대체 호출 · 1회"]
+    synthesizer -.->|"403 / 429 / 할당량 · 시간초과 · 5xx"| fallback
     synthesizer --> endNode(["END"])
     http -.->|"status · token · done 또는 error 후 done"| proxy
     proxy -.->|"타임라인과 Markdown 업데이트"| dashboard
@@ -162,9 +162,12 @@ FastAPI는 그래프 실행 전에 첫 `status(router_node, started)`를 먼저 
 
 | 역할 | 모델 설정 및 기본값 | 공급자 키 |
 | --- | --- | --- |
-| Node 1 의도 분류 | `ROUTER_MODEL=qwen3.7-plus` | `DASHSCOPE_API_KEY` |
-| Node 4 Top-3 종목 분석 | `WORKER_MODEL=qwen3.8-flash` | `DASHSCOPE_API_KEY` |
-| Node 6 종합 진단 · Module 8 RAGAS Judge · 대체 호출 | `SYNTHESIZER_MODEL=gemini-3.8-flash` | `GEMINI_API_KEY` |
+| 2주 가격 카드 분석가 | `ANALYST_MODEL=qwen3.7-plus` | `DASHSCOPE_API_KEY` |
+| 채팅 질문 답변 (Node 6) | `ANSWER_MODEL=qwen3.8-flash` | `DASHSCOPE_API_KEY` |
+| 장애 대체 (분석가·답변 공통) | `FALLBACK_MODEL=gemini-3.8-flash` | `GEMINI_API_KEY` |
+| Module 8 RAGAS Judge | `JUDGE_MODEL=gemini-3.8-flash` | `GEMINI_API_KEY` |
+
+의도 분류는 LLM 없이 로컬 정규식이 맡고, 종목별 위험 분석문을 쓰던 워커 LLM 호출도 없앴습니다. Gemini는 평소 호출하지 않고 DashScope가 429·403·할당량 오류, 시간초과, 5xx를 내면 한 번만 호출합니다. 그래도 실패하면 로컬 결과를 냅니다.
 
 DashScope의 기본 주소는 `DASHSCOPE_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1`입니다.
 
@@ -190,7 +193,11 @@ finguard-ai/
 │   ├── citations.py          # DOC-N 별칭 체계(AliasBook)와 14자리 공시번호 마스킹
 │   ├── llm.py                # 역할별 공급자 선택, 할당량 대체, 재시도, 키가 지워진 실패 로그
 │   ├── report.py             # LLM 없이도 동작하는 결정론적 리포트 생성
-│   ├── price_bands.py        # 1개월 가격 밴드: 로컬 결과 먼저 전송, 공시 근거는 나중에 보강
+│   ├── price_bands.py        # 로컬 가격 밴드 계산과 SSE 스트림: 로컬 결과를 먼저 전송
+│   ├── price_card.py         # 선택 종목 2주 가격 카드: 재료 번호 부여, 분석가 호출, 검증, 로컬 대체, Redis 캐시
+│   ├── card_validation.py    # 분석가 출력 검증: 순서·ATR 범위·근거 번호·인용·숫자 대조
+│   ├── chart_levels.py       # 이동평균·스윙 고저점·매물대·ATR14 (Decimal)
+│   ├── card_log.py           # 가격 카드 기록(price_card_log)과 10거래일 적중 판정
 │   ├── dart_etl.py           # DART 공시·CB/BW/EB 인제스트, Redis 분산 락, 오버행 Upsert
 │   ├── dart_chunks.py        # DART HTML/XML → Markdown 표 청킹(rowspan·colspan, 헤더 복제)
 │   ├── dart_rag.py           # 하이브리드 SQL, Kiwi 토큰화, FP16 임베딩·리랭킹, gpu_semaphore
@@ -203,7 +210,7 @@ finguard-ai/
 │   ├── db.py                 # 프로세스 공유 AsyncConnectionPool (min 1, max 8)
 │   ├── market_time.py        # KRX 캘린더, 15:40 KST 확정 시각, 캔들 폴링 간격
 │   ├── serialization.py      # Decimal을 문자열로 유지하는 단일 JSON 인코더
-│   ├── migrations/           # 001(stock_master·overhang_events), 004(dart_chunks), 005(market 컬럼)
+│   ├── migrations/           # 001(stock_master·overhang_events), 004(dart_chunks), 005(market 컬럼), 006(price_card_log)
 │   └── start.sh              # 컨테이너 기동: 마이그레이션 → 조건부 종목 동기화 → 서버
 ├── frontend/
 │   ├── app/api/              # PIN 검증 Route Handler (account, chat, stocks/search, candles)
@@ -216,7 +223,8 @@ finguard-ai/
 │   └── tests/                # node --test 단위 테스트
 ├── scripts/
 │   ├── dev.py                # 로컬 개발 스택 일괄 실행
-│   ├── eval_ragas.py         # RAGAS 20건 평가 (dry-run / 실측)
+│   ├── eval_ragas.py         # RAGAS 20건 평가 (dry-run / 실측, --answer-model 모델 비교)
+│   ├── score_price_cards.py  # 10거래일 지난 가격 카드의 AI·로컬 적중률 채점
 │   ├── benchmark_latency.py  # TTFE·TTFT·Warm/Cold 지연시간 벤치마크
 │   └── smoke_test_e2e.py     # FP16 VRAM 피크 + FastAPI·Next.js 실제 HTTP 스트림 검증
 ├── data/eval/ragas_benchmark_20.json  # 5대 공시 유형 × 4개 발행사 평가 데이터셋
@@ -235,7 +243,7 @@ finguard-ai/
 
 **결정.** 스코어카드, 오버행 희석률, 4분기 실적 역산, PER/PBR, 매수 시뮬레이션은 [`finance_calc.py`](backend/finance_calc.py)의 순수 함수가 계산합니다. 이 모듈은 외부 I/O가 없습니다. 연산은 `Context(prec=64, rounding=ROUND_HALF_UP)`에서 수행합니다. BIGINT 크기의 두 값을 곱해도 중간 자릿수가 잘리지 않습니다.
 
-**LLM 입력 범위.** [`cloud_context()`](backend/stock_analysis.py)는 LLM에 보낼 페이로드를 새로 만듭니다. 들어가는 값은 종목명, 비중(%), 수익률(%), 점수 합계, 마스킹한 공시 청크뿐입니다. 원화 금액, 보유 수량, 계좌번호, 사용자 질문 원문은 들어가지 않습니다. 라우터에 보내는 질문도 숫자를 `○`로 치환합니다. 이 경계는 `test_cloud_prompts_allow_only_masked_indicators_and_disclosures`가 검증합니다.
+**LLM 입력 범위.** [`cloud_context()`](backend/stock_analysis.py)는 LLM에 보낼 페이로드를 새로 만듭니다. 들어가는 값은 질문 원문(계좌번호 형태의 숫자는 `(계좌번호 생략)`으로 치환), 종목명·코드·수량·평단가·현재가·비중·수익률, 예수금·총평가액, 검증된 가격 카드, 재료(`[P-n]` 지표, `[NEWS-n]` 뉴스 제목·요약, 14자리 번호를 가린 `[DOC-N]` 공시 청크), 로컬 시뮬레이션 결과입니다. 계좌번호, 증권사·외부 API 키와 토큰, PIN은 나가지 않습니다. 이 경계는 `test_answer_context_has_question_and_account_but_no_account_number`가 검증합니다. 처음에는 종목명·비중·수익률 같은 지표만 보냈습니다. 그러나 그러면 "추가매수할까?" 같은 질문에 답할 수 없어, 계좌 숫자와 질문은 허용하고 자격증명만 막는 쪽으로 경계를 옮겼습니다.
 
 **직렬화.** [`serialization.encode`](backend/serialization.py)는 `Decimal`을 `format(value, "f")` 문자열로 내보냅니다. API 응답, SSE 프레임, Redis 캐시, LLM 프롬프트가 모두 이 인코더 하나를 씁니다. 그래서 어느 경로에서도 float로 바뀌지 않습니다. 프론트엔드 타입도 `` DecimalString = `${number}` ``으로 선언했습니다.
 
@@ -286,13 +294,13 @@ finguard-ai/
 
 ### 3.4 단일 LLM 공급자 대신 역할별 다중 공급자와 단계적 대체
 
-**결정.** [`llm.invoke()`](backend/llm.py)는 역할(`router`, `worker`, `synthesizer`)마다 다른 모델과 실패 정책을 씁니다. 두 공급자 모두 같은 Pydantic 스키마와 같은 메시지를 받습니다.
+**결정.** [`llm.invoke()`](backend/llm.py)는 역할(`analyst`, `answer`, `judge`)마다 모델을 고르고, 장애 대체 모델(`fallback`)은 별도로 둡니다. 두 공급자 모두 같은 Pydantic 스키마와 같은 메시지를 받습니다. 모델 이름은 `ANALYST_MODEL`·`ANSWER_MODEL`·`FALLBACK_MODEL`·`JUDGE_MODEL`로 바꿀 수 있습니다.
 
 | 역할 | 1차 | 실패 시 |
 | --- | --- | --- |
-| Router | Qwen (`timeout=15`) | Fast Path로 판정된 요청은 **250ms** 안에 응답이 없으면 정규식 분류 결과를 그대로 사용 |
-| Worker | Qwen (`timeout=45`), 시간초과 시 1회 재시도 | 같은 공급자의 Router 모델로 대체. 403·429·할당량 오류는 즉시 Gemini로 전환 |
-| Synthesizer | Gemini (`timeout=60`) | 503·504면 1.5초 → 3초 → 6초 대기(최대 25% 지터) 후 재시도, 그래도 실패하면 DashScope로 대체 |
+| 가격 카드 분석가 | Qwen 3.7-plus (`timeout=30`) | 403·429·할당량·시간초과·5xx면 Gemini를 한 번 호출하고, 그래도 실패하면 로컬 카드와 경고를 반환 |
+| 채팅 답변 | Qwen 3.8-flash | 같은 조건에서 Gemini를 한 번 호출하고, 실패하면 로컬 `diagnosis_report`로 완결 |
+| RAGAS Judge | Gemini 3.8-flash | 평가 전용이며 대체 경로 없음 |
 
 - **할당량 판정**: HTTP 상태 코드를 예외의 `__cause__` 체인을 따라 찾고, 메시지의 `quota`, `free tier`, `allocation exhausted` 패턴도 확인합니다.
 - **응답 검증**: Gemini의 안전 필터 차단(`SAFETY`, `PROHIBITED_CONTENT` 등)이나 빈 응답, 스키마 불일치는 모두 `LLMUnavailable`로 바꿔 상위에 전달합니다. DashScope는 `json_mode`에 스키마를 함께 넣고 Qwen의 추론 토큰을 `thinking_budget=2048`로 제한합니다.
@@ -320,7 +328,14 @@ finguard-ai/
 3. 등록되지 않은 별칭이나 원시 14자리 공시번호가 있는 문장만 제거하고, 경고를 `guardrail_warnings`에 남깁니다.
 4. 남은 별칭은 실제 공시번호로 바꾸고, 리포트에서 `https://dart.fss.or.kr/dsaf001/main.do?rcpNo=…` 링크로 연결합니다.
 
-가격 밴드 근거([`enrich_band`](backend/price_bands.py))는 기준이 더 엄격합니다. 인용이 없거나, 미등록 별칭이 있거나, `원·주·%` 단위의 숫자가 들어간 문장은 버리고 로컬 엔진이 만든 근거를 유지합니다. LLM이 가격을 추정하지 못하게 하려는 것입니다.
+가격 카드는 AI가 가격까지 정하되 코드가 검증합니다([`card_validation.py`](backend/card_validation.py)). 분석가가 낸 `low`·`high`·`ceiling`은 레벨마다 다음을 통과해야 합니다.
+
+- 양의 정수 `Decimal`이며 KRX 호가 단위로 반올림, `low ≤ 현재가 ≤ ceiling`, `low < high ≤ ceiling`(순서가 깨지면 세 레벨 모두 로컬 값).
+- 현재가와의 차이가 `4 × ATR14` 이내.
+- `basis`에 실제 존재하는 `[P-n]`이 하나 이상. 인용 지표값에서 `max(1 × ATR14, 3%)`보다 멀면 `[NEWS-n]`·`[DOC-n]` 인용이 필요하고, `2 × ATR14`를 넘으면 거부.
+- 미등록 번호·14자리 공시번호가 있는 문장, `원·주·%` 숫자가 재료에 없는 문장은 Drop.
+
+실패한 레벨만 로컬 계산값으로 바꾸고 화면에 `기본 계산` 배지를 붙입니다(통과한 레벨은 `AI`). 채팅 답변도 같은 방식으로 문장 단위로 검증해, 알 수 없는 태그·14자리 번호·입력에 없는 숫자·확정 매수/매도 지시 문장을 버립니다.
 
 ### 3.7 데이터 정합성: 정정공시·우선주·회계기준
 
@@ -438,7 +453,7 @@ finguard-ai/
 
 - **SSE 이벤트 프로토콜**: `status`(노드·단계·`task_id`), `token`, `price_bands`, `error`, `done`의 5종입니다. 실패할 때도 `error` 다음에 `done(ok=false)`을 보내, 클라이언트가 스트림 종료를 항상 같은 방식으로 처리합니다. `stock_worker`의 시작 이벤트에만 종목 코드와 이름을 싣고, 이후 단계에는 클라이언트 reducer가 `task_id` 기준으로 이어 붙입니다.
 - **fetch 기반 SSE 파서**: `EventSource`는 커스텀 헤더(PIN)를 보낼 수 없어서 [`readChatEvents`](frontend/lib/chat-stream.ts)를 직접 구현했습니다. 청크 경계에서 `\r\n`이 나뉘는 경우까지 처리합니다.
-- **점진적 결과 전송**: 가격 밴드는 로컬 엔진 결과(현재가·20일선·평균 변동폭·5일 수급)를 먼저 `price_bands` 이벤트로 보냅니다. 이어서 공시를 적재·검색하고, LLM 근거를 보강한 최종본을 `done`으로 보냅니다. LLM이 실패해도 첫 결과는 이미 화면에 있습니다.
+- **점진적 결과 전송**: 가격 카드는 로컬 엔진 결과(현재가·20일선·평균 변동폭·5일 수급)를 먼저 `price_bands` 이벤트로 보냅니다. 이어서 지표·뉴스·공시를 모아 분석가를 호출하고, 검증을 통과한 2주 카드를 `done`으로 보냅니다. 결과는 종목·기준 거래일 키로 Redis에 캐시되어 채팅이 같은 카드를 재사용합니다. LLM이 실패해도 첫 결과는 이미 화면에 있습니다.
 - **LLM 없이 완결되는 리포트**: [`report.diagnosis_report`](backend/report.py)는 시뮬레이션, 20일선 시나리오, 수급, 희석률, 점수, 오버행 공시 링크를 결정론적으로 만듭니다. LLM 요약은 그 뒤에 덧붙는 선택 항목입니다(`test_total_llm_outage_streams_scores_simulation_and_disclosure_evidence`).
 - **DART 표 청킹**: `rowspan`·`colspan`을 펼치고, 중첩 표를 분리하고, 셀 안의 `|`를 이스케이프합니다. 1,800자를 넘는 표는 헤더 행을 모든 청크에 복제합니다. 헤더 자체가 너무 넓으면 열 단위로 쪼개 값이 항상 자기 열 제목 아래 있게 합니다. DART가 `<th>` 대신 `<td>`로 헤더를 쓰는 경우와 `cp949` 인코딩도 처리합니다.
 - **매수 시뮬레이션 자연어 파싱**: 보유 종목명·코드는 긴 이름부터 정규식으로 매칭하고, 예산은 `%`, `퍼센트`, `원`, `만원`, `억원` 중 정확히 하나만 받습니다. 모호하면 계산하지 않고 다시 묻는 메시지를 돌려줍니다. 계산은 증권사 장부가(`purchase_amount`)를 기준으로 해, 반올림된 평단가가 원가를 바꾸지 않습니다.
@@ -599,7 +614,15 @@ TTFE, Fast Path TTFT, Warm Cache는 표본의 최댓값을 사용하고 Cold Cac
 
 두 스크립트는 기본적으로 JSON을 출력합니다. 종료 코드 0은 목표 충족, 1은 목표 미달, 2는 설정 또는 실행 오류입니다.
 
-### 7.3 테스트 스위트
+### 7.3 2주 가격 카드 적중률
+
+선택 종목의 카드는 기준일마다 [`price_card_log`](backend/migrations/006_price_card_log.sql)(종목·기준일당 한 행)에 AI 값과 같은 날 로컬 값을 함께 기록합니다. 10거래일이 지나면 확정된 일봉으로 채점합니다. 저점 유지(기간 최저가 ≥ low × 0.99), 고점 도달(기간 최고가 ≥ high), 상단 유지(기간 최고가 ≤ ceiling)를 AI 카드와 로컬 카드로 나눠 비교해, AI가 로컬 계산보다 나은지 수치로 확인합니다. 미완성 봉은 채점하지 않습니다.
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 scripts/score_price_cards.py
+```
+
+### 7.4 테스트 스위트
 
 | 영역 | 내용 |
 | --- | --- |

@@ -41,10 +41,11 @@ services:
       ECOS_API_KEY: ${ECOS_API_KEY:-}
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-https://dashscope-intl.aliyuncs.com/compatible-mode/v1}
-      ROUTER_MODEL: ${ROUTER_MODEL:-qwen3.7-plus}
-      WORKER_MODEL: ${WORKER_MODEL:-qwen3.8-flash}
+      ANALYST_MODEL: ${ANALYST_MODEL:-qwen3.7-plus}
+      ANSWER_MODEL: ${ANSWER_MODEL:-qwen3.8-flash}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      SYNTHESIZER_MODEL: ${SYNTHESIZER_MODEL:-gemini-3.8-flash}
+      FALLBACK_MODEL: ${FALLBACK_MODEL:-gemini-3.8-flash}
+      JUDGE_MODEL: ${JUDGE_MODEL:-gemini-3.8-flash}
       BROKER_PROVIDER: ${BROKER_PROVIDER:-toss}
       TOSS_CLIENT_ID: ${TOSS_CLIENT_ID:-}
       TOSS_CLIENT_SECRET: ${TOSS_CLIENT_SECRET:-}
