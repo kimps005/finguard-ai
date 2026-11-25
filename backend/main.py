@@ -152,6 +152,8 @@ async def stock_candles(request: Request, stock_code: Annotated[str, Path(patter
 class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     user_query: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
+    # The stock whose price card is on screen; the answer covers it even when it is not held.
+    selected_stock_code: Annotated[str, StringConstraints(pattern=r"^[0-9A-Za-z]{6}$")] | None = None
 
 
 class PriceBandRequest(BaseModel):
@@ -165,12 +167,14 @@ def sse(event, data):
     return f"event: {event}\ndata: {dump(data)}\n\n"
 
 
-async def chat_events(graph, query):
+async def chat_events(graph, query, selected_stock_code=None):
     yield sse("status", {"node": "router_node", "phase": "started"})
     final = {}
+    request = {"user_query": query,
+               "selected_stock_code": selected_stock_code.upper() if selected_stock_code else None}
     try:
         async for mode, data in graph.astream(
-            {"user_query": query}, stream_mode=["tasks", "custom", "values"], output_keys=PUBLIC_FIELDS,
+            request, stream_mode=["tasks", "custom", "values"], output_keys=PUBLIC_FIELDS,
         ):
             if mode == "tasks":
                 node = data["name"]
@@ -181,8 +185,8 @@ async def chat_events(graph, query):
                 status = {"node": node, "phase": phase, "task_id": data["id"]}
                 if started and node == "stock_worker":
                     # Name the stock once; the client keeps it for this task's later phases.
-                    stock = data["input"]["stock"]
-                    status.update(stock_code=stock["stock_code"], stock_name=stock["name"])
+                    job = data["input"]
+                    status.update(stock_code=job["stock_code"], stock_name=job["name"])
                 yield sse("status", status)
             elif mode == "custom":
                 yield sse("token", data)
@@ -222,6 +226,6 @@ async def price_band_events(market, target_stock_code=None):
 @app.post("/api/v1/chat/stream", response_class=StreamingResponse)
 async def chat_stream(body: ChatRequest | PriceBandRequest, request: Request):
     events = (price_band_events(request.app.state.market, body.target_stock_code) if isinstance(body, PriceBandRequest)
-              else chat_events(request.app.state.graph, body.user_query))
+              else chat_events(request.app.state.graph, body.user_query, body.selected_stock_code))
     return StreamingResponse(events, media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

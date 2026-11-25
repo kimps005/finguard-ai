@@ -118,7 +118,7 @@ async def invoke_gemini(role, model, messages, schema, *, timeout=30):
 
     text = raw.text.strip()
     if role == "answer" and text.startswith("### "):
-        # The report and its citations still pass through stock_analysis.synthesize.
+        # The report and its citations still pass through stock_analysis.answer.
         return schema.model_validate({"analysis_text": text, "citations": []})
     if not text or parsed is not None:
         raise LLMUnavailable(f"Gemini returned no analysis text (finish={finish})", reason="빈 응답")

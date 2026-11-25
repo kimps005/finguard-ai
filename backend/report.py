@@ -8,6 +8,7 @@ from dataclasses import asdict
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 import re
+from urllib.parse import quote
 
 from backend.citations import AliasBook
 from backend.stock_analysis import ANSWER_HEADING, EVIDENCE_HEADING
@@ -39,6 +40,40 @@ def won(amount):
 
 def disclosure_link(alias, title, receipt):
     return f"[{alias}](https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt}) · {' '.join(title.split())}"
+
+
+def source_line(tag, title, target):
+    """A cited answer source: DOC to its DART filing, NEWS to its article, P (or an unsafe link) as text."""
+    title = " ".join(title.split())
+    if target is None:
+        return f"[{tag}] {title}"
+    if tag.startswith("DOC-"):
+        return disclosure_link(tag, title, target)
+    # Parentheses and spaces would end a Markdown link destination early.
+    return f"[{tag}]({quote(target, safe=':/?#[]@!$&*+,;=%~')}) · {title}"
+
+
+def card_line(band):
+    levels = band["levels"]
+    source = {"local": " (기본 계산)", "partial": " (AI·기본 계산 혼합)"}.get(band.get("ai_status"), "")
+    return (f"{band['name']} 2주 가격 카드{source} · 현재가 {won(band['current_price'])}, "
+            f"단기 저점 {won(levels['buy_zone']['price'])}, 단기 고점 {won(levels['sell_zone']['price'])}, "
+            f"2주 상단 {won(levels['peak_limit']['price'])}")
+
+
+def simulation_line(simulation):
+    return (f"매수 시뮬레이션 · 투자 금액 {won(simulation['invested_amount'])}, "
+            f"매수 수량 {simulation['buy_quantity']:,}주, 예상 평단가 {won(simulation['average_price'])}")
+
+
+def answer_report(state, core, sources):
+    """The answer model's verified core answer; the evidence is local: cards, simulation and cited sources."""
+    simulation = state["simulation_result"] or {}
+    evidence = [simulation_line(simulation)] if simulation and "message" not in simulation else []
+    evidence += [card_line(row["card"]) for row in state["verified_stock_results"] if row.get("card")]
+    evidence += [source_line(*source) for source in sources]
+    grounds = "\n".join(f"- {item}" for item in evidence) or "- 가격 카드 없음"
+    return f"{ANSWER_HEADING}\n\n{core}\n\n{EVIDENCE_HEADING}\n\n{grounds}"
 
 
 # "추가매수할까? 홀드할까?" style questions ask for a decision, not a data readout.
@@ -78,7 +113,9 @@ def diagnosis_report(state, summary="", disclosures=()):
     holdings = state["holdings"]
     selected = [h for h in holdings if h["stock_code"] == simulation.get("stock_code")
                 or h["stock_code"] in query or (h["name"] and h["name"] in query)]
-    selected = selected or sorted(holdings, key=lambda h: -h["weight"])[:3]
+    targets = {row["stock_code"] for row in state["stock_analysis_results"]}
+    selected = (selected or [h for h in holdings if h["stock_code"] in targets]
+                or sorted(holdings, key=lambda h: -h["weight"])[:3])
     answer, evidence = [], []
     if "message" in simulation:
         if not decision:
@@ -162,6 +199,15 @@ def diagnosis_report(state, summary="", disclosures=()):
         else:
             answer.append(scenario)
 
+    held = {h["stock_code"] for h in holdings}
+    for row in state["stock_analysis_results"]:
+        # A selected stock the account does not hold still gets its card's levels.
+        if (band := row.get("card")) and row["stock_code"] not in held:
+            levels = band["levels"]
+            answer.append(f"**{band['name']}**(미보유) 2주 가격 카드 기준 단기 저점은 "
+                          f"{won(levels['buy_zone']['price'])}, 단기 고점은 {won(levels['sell_zone']['price'])}, "
+                          f"2주 상단은 {won(levels['peak_limit']['price'])}입니다.")
+            evidence.append(card_line(band))
     if "message" in simulation and decision:
         answer.append(simulation["message"])
     if summary:

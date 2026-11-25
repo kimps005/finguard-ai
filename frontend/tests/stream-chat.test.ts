@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { SessionExpired, streamChat } from "../lib/chat-stream.ts";
+import { SessionExpired, chatRequest, streamChat } from "../lib/chat-stream.ts";
 
 const options = { pin: "test-pin", pinHeader: "X-App-Pin", signal: new AbortController().signal };
 
@@ -22,6 +22,14 @@ test("streamChat posts JSON with the PIN header and yields the SSE events", asyn
   const events = await collect(streamChat({ mode: "price_bands", target_stock_code: "005930" }, options, "시작 실패"));
   assert.deepEqual(events, [{ event: "done", data: { ok: false } }]);
   assert.equal(upstream.mock.callCount(), 1);
+});
+
+test("a chat question carries the stock whose price card is on screen", async (t) => {
+  t.mock.method(globalThis, "fetch", async (_url: string, init: RequestInit) => {
+    assert.deepEqual(JSON.parse(String(init.body)), { user_query: "추가매수할까? 홀드할까?", selected_stock_code: "005930" });
+    return new Response('event: done\ndata: {"ok":false}\n\n', { headers: { "Content-Type": "text/event-stream" } });
+  });
+  await collect(streamChat(chatRequest("추가매수할까? 홀드할까?", "005930"), options, "시작 실패"));
 });
 
 test("a rejected PIN raises SessionExpired and other failures raise the caller's message", async (t) => {

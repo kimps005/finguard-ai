@@ -2,20 +2,17 @@
 
 import re
 from dataclasses import dataclass, field
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 
 from pydantic import BaseModel, Field
 
 from backend.chart_levels import Fact, round_to_tick
-from backend.citations import RECEIPT, TAG
+from backend.citations import RECEIPT, TAG, unlisted_number, with_rounded as _with_rounded
 from backend.stock_analysis import cited_sentences
 
 LEVELS = ("low", "high", "ceiling")
 LEVEL_NAMES = {"low": "단기 저점", "high": "단기 고점", "ceiling": "단기 천장"}
 ATR_WARNING = "변동성 자료 부족으로 기본 계산을 사용했습니다."
-_NUMBER = re.compile(r"(?<![0-9.,A-Za-z-])([0-9][0-9,]*(?:\.[0-9]+)?)(?:\s?([천만억]))?(?:\s?(원|주|%))?(년)?")
-_PERIOD_SUFFIX = tuple("간일차봉선째")
-_MULTIPLIER = {"천": Decimal(1000), "만": Decimal(10000), "억": Decimal(10) ** 8}
 
 
 class LevelProposal(BaseModel):
@@ -56,14 +53,6 @@ def parse_price(text: str) -> Decimal | None:
     return Decimal(cleaned) if re.fullmatch(r"[1-9][0-9]*", cleaned) else None
 
 
-def _with_rounded(values) -> set[Decimal]:
-    out = set()
-    for value in values:
-        out.add(value)
-        out.add(value.to_integral_value(ROUND_HALF_UP))
-    return out
-
-
 def _known_tags(m: Materials) -> set[str]:
     return {f.id for f in m.facts} | set(m.news) | set(m.docs)
 
@@ -71,16 +60,7 @@ def _known_tags(m: Materials) -> set[str]:
 def _text_ok(text: str, m: Materials, allowed: set[Decimal]) -> bool:
     if RECEIPT.search(text) or any(tag not in _known_tags(m) for tag in TAG.findall(text)):
         return False
-    for match in _NUMBER.finditer(text):
-        raw, mult, unit, year = match.groups()
-        digits = raw.replace(",", "")
-        if not (unit or mult) and (year or not ("," in raw or len(digits.split(".")[0]) >= 4)):
-            continue  # plain small number or a year, not a price-like figure
-        if unit == "주" and not mult and (raw == "2" or text[match.end():match.end() + 1] in _PERIOD_SUFFIX):
-            continue  # "2주" is the card horizon; "3주간", "10주선" are periods, not share counts
-        if Decimal(digits) * _MULTIPLIER.get(mult, Decimal(1)) not in allowed:
-            return False
-    return True
+    return unlisted_number(text, allowed) is None
 
 
 def _distance(price: Decimal, fact: Fact) -> Decimal:

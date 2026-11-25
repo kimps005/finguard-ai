@@ -13,9 +13,9 @@ test("digits inside a task UUID are never read as a stock code", () => {
 
 test("worker steps name the stock the server sent", () => {
   const worker = { node: "stock_worker", phase: "started" as const, task_id: "t", stock_code: "018880" };
-  assert.equal(describeTask({ ...worker, stock_name: "한온시스템" }, []), "한온시스템(018880) 공시·수급 분석");
+  assert.equal(describeTask({ ...worker, stock_name: "한온시스템" }, []), "한온시스템(018880) 가격 카드 분석 중");
   // Without a name, the holding list fills it in; an unknown code still shows the code.
-  assert.equal(describeTask(worker, holdings), "한온시스템(018880) 공시·수급 분석");
-  assert.equal(describeTask({ ...worker, stock_code: "005930" }, holdings), "005930 공시·수급 분석");
-  assert.equal(describeTask({ node: "stock_worker", phase: "started" }, holdings), "보유 종목 DART 공시·재무 리스크 분석");
+  assert.equal(describeTask(worker, holdings), "한온시스템(018880) 가격 카드 분석 중");
+  assert.equal(describeTask({ ...worker, stock_code: "005930" }, holdings), "005930 가격 카드 분석 중");
+  assert.equal(describeTask({ node: "stock_worker", phase: "started" }, holdings), "가격 카드 분석 중");
 });

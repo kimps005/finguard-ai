@@ -9,7 +9,7 @@ import remarkGfm from "remark-gfm";
 import { analysisReducer, idleRun } from "../lib/analysis-run";
 import { describeTask, displayField, stageNames } from "../lib/progress-labels";
 import {
-  SessionExpired, streamChat, type AccountSnapshot, type DecimalString, type Scorecards, type Status, type StockSearchResult,
+  SessionExpired, chatRequest, streamChat, type AccountSnapshot, type DecimalString, type Scorecards, type Status, type StockSearchResult,
 } from "../lib/chat-stream";
 import PriceOutlook, { WATCHLIST } from "./price-outlook";
 
@@ -226,7 +226,8 @@ export default function Dashboard() {
     dispatch({ type: "start", topic: label });
 
     try {
-      const events = streamChat({ user_query: question }, { pin, pinHeader: PIN_HEADER, signal: controller.signal },
+      // The chat answers about the card on screen as well as the holdings the question names.
+      const events = streamChat(chatRequest(question, stock.stock_code), { pin, pinHeader: PIN_HEADER, signal: controller.signal },
                                 "진단을 시작할 수 없습니다. 다시 시도해 주세요.");
       for await (const item of events) {
         if (item.event === "status") {

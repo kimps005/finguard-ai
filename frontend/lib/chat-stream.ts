@@ -119,6 +119,16 @@ type ChatEvent =
   | { event: "error"; data: { message: string } }
   | { event: "done"; data: Diagnosis | (BandSnapshot & { ok: true; mode: "price_bands" }) | { ok: false } };
 
+export interface ChatRequest {
+  user_query: string;
+  /** The stock whose price card is on screen; the answer covers it even when it is not held. */
+  selected_stock_code?: string;
+}
+
+export function chatRequest(user_query: string, selected_stock_code?: string): ChatRequest {
+  return selected_stock_code ? { user_query, selected_stock_code } : { user_query };
+}
+
 /** The access PIN was rejected or has expired; the caller should lock the dashboard. */
 export class SessionExpired extends Error {}
 

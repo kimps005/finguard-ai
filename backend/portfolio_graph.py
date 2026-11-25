@@ -1,26 +1,32 @@
 """Request-scoped LangGraph portfolio diagnosis."""
 
-import asyncio
 from dataclasses import asdict
 from datetime import date
 from decimal import Decimal
+import logging
 import operator
 import re
-from typing import Annotated, Literal, TypedDict
+from typing import Annotated, Literal, NotRequired, TypedDict
 
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, Send
 
-from backend import llm, stock_analysis
+from backend import llm, price_card, stock_analysis
 from backend.broker import Balance
 from backend.finance_calc import calculate_scorecard, simulate_purchase
 from backend.portfolio_market import MarketData, ScoreInputs
-from backend.report import account_view, diagnosis_report, quote_parts
+from backend.report import account_view, answer_report, diagnosis_report, quote_parts
+
+
+logger = logging.getLogger(__name__)
+MAX_TARGETS = 3
 
 
 class Query(TypedDict):
     user_query: str
+    # The stock whose price card is on screen; it is answered about even when not held.
+    selected_stock_code: NotRequired[str | None]
 
 
 class PortfolioState(Query, total=False):
@@ -57,19 +63,41 @@ async def router_node(state):
             "quant_scorecards": {}, "macro_context": None, "simulation_result": None}
 
 
+def target_codes(state) -> list[str]:
+    """The selected stock, then holdings the question names in order, at most three.
+
+    With neither, the three heaviest STOCK holdings. Score inputs are not required: a selected stock
+    the account does not hold has none, and price_card decides held or not on its own.
+    """
+    query, holdings = state["user_query"], state["holdings"]
+    codes = [selected] if (selected := state.get("selected_stock_code")) else []
+    mentions = []
+    for holding in holdings:
+        found = [query.find(label) for label in (holding["stock_code"], holding["name"]) if label and label in query]
+        if found:
+            mentions.append((min(found), holding["stock_code"]))
+    codes = list(dict.fromkeys(codes + [code for _, code in sorted(mentions)]))[:MAX_TARGETS]
+    if not codes:
+        stocks = [h for h in holdings if h["asset_type"] == "STOCK"]
+        codes = [h["stock_code"] for h in sorted(stocks, key=lambda h: (-h["weight"], h["stock_code"]))[:MAX_TARGETS]]
+    return codes
+
+
 def route_to_stock_workers(state: PortfolioState) -> str | list[Send]:
-    # A stock whose score inputs could not be collected has nothing to analyze.
-    stocks = [s for s in state["holdings"] if s["asset_type"] == "STOCK" and s["corp_code"]
-              and s["stock_code"] in state["score_inputs"]]
-    if not stocks:
+    codes = target_codes(state)
+    if not codes:
         return "synthesizer_node"
-    top = sorted(stocks, key=lambda s: (-s["weight"], s["stock_code"]))[:3]
-    return [Send("stock_worker", {
-        "stock": stock, "query": state["user_query"],
-        "corp_name": state["score_inputs"][stock["stock_code"]].stock.corp_name,
-        "scorecard": state["quant_scorecards"][stock["stock_code"]],
-        "events": state["score_inputs"][stock["stock_code"]].events or [],
-    }) for stock in top]
+    names = {h["stock_code"]: h["name"] for h in state["holdings"]}
+    return [Send("stock_worker", {"stock_code": code, "name": names.get(code)}) for code in codes]
+
+
+def card_row(stock_code, band):
+    """A worker row: the card, plus the doc_map/disclosures shape the local report links filings from."""
+    docs = band["disclosures"]
+    return {"stock_code": stock_code, "card": band,
+            "doc_map": {doc["alias"]: doc["receipt"] for doc in docs},
+            "disclosures": [{"source": doc["alias"], "title": doc["title"], "text": ""} for doc in docs],
+            "news": band["news"]}
 
 
 async def simulation(query, balance, market):
@@ -131,13 +159,27 @@ def build_graph(market: MarketData):
         return Command(goto=route_to_stock_workers(state))
 
     async def stock_worker(job):
-        result = await stock_analysis.analyze_stock(job, market.external)
-        return {"stock_analysis_results": [result]}
+        code = job["stock_code"]
+        try:
+            # A cached card is reused; otherwise the analyst builds it (or its local fallback) now.
+            band = (await price_card.get_or_build_card(market, code))["band"]
+        except Exception as exc:  # CancelledError is not an Exception and still propagates.
+            # Provider errors can carry credential-bearing URLs; log the type only.
+            logger.warning("Price card for chat unavailable (%s)", type(exc).__name__)
+            row = {"stock_code": code, "card": None, "doc_map": {}, "disclosures": [], "news": [],
+                   "warnings": [f"{job['name'] or code} 가격 카드를 만들 수 없어 카드 없이 답변합니다."]}
+            return {"stock_analysis_results": [row]}
+        return {"stock_analysis_results": [card_row(code, band)]}
 
     async def guardrail_node(state):
-        verified = await asyncio.to_thread(stock_analysis.verify_results, state["stock_analysis_results"])
-        verified["guardrail_warnings"] = state["guardrail_warnings"] + verified["guardrail_warnings"]
-        return verified
+        # Cards were validated when built; record them once and surface their warnings.
+        rows = state["stock_analysis_results"]
+        warnings = list(state["guardrail_warnings"])
+        for row in rows:
+            warnings += row.get("warnings", [])
+            if band := row.get("card"):
+                warnings += [f"{band['name']} 가격 카드: {warning}" for warning in band["warnings"]]
+        return {"verified_stock_results": rows, "guardrail_warnings": list(dict.fromkeys(warnings))}
 
     async def synthesizer_node(state):
         write = get_stream_writer()
@@ -145,19 +187,20 @@ def build_graph(market: MarketData):
         if state["intent_type"] == "fast_lookup":
             parts = list(quote_parts(state))
         else:
-            summary, disclosures = "", []
-            if state["holdings"]:
+            report = None
+            if state["holdings"] or state["verified_stock_results"]:
                 try:
-                    summary, disclosures, notes = await stock_analysis.synthesize(state)
+                    core, sources, notes = await stock_analysis.answer(state)
                     warnings.extend(notes)
+                    report = answer_report(state, core, sources)
                 except llm.LLMUnavailable as exc:
-                    warnings.append(f"종합 LLM을 사용할 수 없어 로컬 정량 리포트를 제공합니다. [{exc.reason}]")
-            parts = [diagnosis_report(state, summary, disclosures)]
+                    warnings.append(f"답변 모델을 사용할 수 없어 로컬 정량 리포트를 제공합니다. [{exc.reason}]")
+            parts = [report or diagnosis_report(state)]
         for part in parts:
             write({"text": part})
         return {"final_report": "".join(parts), "guardrail_warnings": warnings}
 
-    # Only the query crosses the request boundary. No checkpointer retains reducer channels.
+    # Only the query and the selected code cross the request boundary. No checkpointer retains reducer channels.
     graph = StateGraph(PortfolioState, input_schema=Query)
     for node in (router_node, fast_quote_node, market_data_node, quant_scorecard_node,
                  fan_out_node, stock_worker, guardrail_node, synthesizer_node):

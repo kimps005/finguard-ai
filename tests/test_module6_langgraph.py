@@ -1,5 +1,4 @@
 import asyncio
-from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal as D
 import json
@@ -10,7 +9,7 @@ import httpx
 from langchain_core.messages import AIMessage
 import pytest
 
-from backend import dart_rag, llm, portfolio_market, stock_analysis
+from backend import dart_rag, llm, portfolio_market, price_card, stock_analysis
 from backend.broker import (
     KST, LIVE, VIRTUAL, Balance, BrokerConnector, BrokerError, BrokerSettings, Credentials, DailyBar,
     FiveDayFlow, Holding, InvestorFlow,
@@ -30,6 +29,28 @@ RECEIPT = "20261120000001"
 
 def gemini_result(answer):
     return {"parsed": answer, "raw": AIMessage(content=""), "parsing_error": None}
+
+
+def card_fixture(code, name, *, docs=(("발행결정", RECEIPT),), news=(), warnings=(), current=D(100)):
+    """A validated 2-week price card as price_card.get_or_build_card returns it."""
+    def level(price, reason, basis):
+        return {"price": D(price), "reason": reason, "current_pct": (D(price) - current) * 100 / current,
+                "source": "ai", "basis": basis}
+
+    return {"as_of": NOW.isoformat(), "band": {
+        "stock_code": code, "name": name, "current_price": current, "change_pct": D("1.00"),
+        "levels": {"buy_zone": level(95, "[P-2] 20일선 지지 [DOC-1]" if docs else "[P-2] 20일선 지지", ["P-2"]),
+                   "sell_zone": level(105, "[P-1] 현재가 위 저항", ["P-1"]),
+                   "peak_limit": level(110, "[P-1] 현재가 위 상단", ["P-1"])},
+        "summary": "[P-2] 20일선 위에서 거래됩니다.",
+        "risks": [{"text": "실적 발표 일정 [DOC-1]", "basis": ["DOC-1"]}] if docs else [],
+        "news": [{"alias": f"NEWS-{i}", "title": title, "link": link} for i, (title, link) in enumerate(news, 1)],
+        "facts": [{"id": "P-1", "label": "현재가", "value": current, "upper": None, "session": None},
+                  {"id": "P-2", "label": "20일선", "value": D(95), "upper": None, "session": None},
+                  {"id": "P-3", "label": "외국인 5일 순매수", "value": D(5), "upper": None, "session": None}],
+        "disclosures": [{"alias": f"DOC-{i}", "title": title, "receipt": receipt}
+                        for i, (title, receipt) in enumerate(docs, 1)],
+        "ai_status": "ai", "warnings": list(warnings), "horizon_sessions": 10}}
 
 
 def position(code="000001", *, asset="STOCK", weight="0.2"):
@@ -69,6 +90,13 @@ def setup_market(monkeypatch, positions):
     answer = {"analysis_text": "2026.11.21 기준 [DOC-1] 희석률은 3.5%입니다. "
                                "[DOC-99] 발행은 확정됐습니다. 수급은 안정적입니다.",
               "citations": ["DOC-1", "DOC-99"], "doc_map": {"DOC-99": RECEIPT}}
+    names = {h.stock_code: h.name for h in positions}
+
+    async def card(market, code):
+        return card_fixture(code, names.get(code, "종목" + code))
+
+    # Workers fetch cards; the card builder itself is covered by test_price_card.
+    monkeypatch.setattr(price_card, "get_or_build_card", AsyncMock(side_effect=card))
     monkeypatch.setenv("DASHSCOPE_API_KEY", "dash-test")
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-test")
     # Most graph tests assert the answer prompt and reply on the Gemini mock.
@@ -246,16 +274,16 @@ def test_top_three_worker_isolation_guardrail_and_repeated_requests(monkeypatch)
     market = setup_market(monkeypatch, [*positions, position("000005", asset="ETF", weight="0.5")])
     graph = build_graph(market)
 
+    async def card(market, code):
+        return card_fixture(code, "종목" + code, docs=(("공시", RECEIPT[:-1] + code[-1]),))
+
+    price_card.get_or_build_card.side_effect = card
     synthesis = llm.ChatGoogleGenerativeAI.return_value.with_structured_output.return_value.ainvoke
+    # Cards arrive 000004, 000003, 000002: each card's DOC-1 becomes DOC-1, DOC-2, DOC-3 in the answer.
     synthesis.return_value = gemini_result(stock_analysis.Analysis(
         analysis_text=f"{stock_analysis.ANSWER_HEADING}\n[DOC-1]과 [DOC-3]에 근거한 진단입니다.\n"
                       f"{stock_analysis.EVIDENCE_HEADING}\n- 전환 가능 물량",
         citations=["DOC-1", "DOC-3"]))
-    async def search(corp_code, query):
-        return [{"rcept_no": RECEIPT[:-1] + corp_code[-1], "report_nm": "공시",
-                 "chunk_text": "2026.11.21 희석률은 3.5%입니다."}]
-
-    dart_rag.search.side_effect = search
 
     async def check():
         state = {"user_query": "포트폴리오 위험 진단"}
@@ -264,18 +292,19 @@ def test_top_three_worker_isolation_guardrail_and_repeated_requests(monkeypatch)
             state = await graph.ainvoke(state)
             raw, checked = state["stock_analysis_results"], state["verified_stock_results"]
             assert [r["stock_code"] for r in raw] == ["000004", "000003", "000002"]
-            assert len(checked) == 3 and state["guardrail_warnings"] == []
-            for original, row in zip(raw, checked, strict=True):
+            assert checked == raw and state["guardrail_warnings"] == []
+            for row in raw:
                 receipt = RECEIPT[:-1] + row["stock_code"][-1]
-                assert original["doc_map"]["DOC-1"] == receipt
-                assert original["analysis_text"] == "" and original["citations"] == []
-                assert row["analysis_text"] == "" and row["citations"] == []
-                assert row["evidence"]["DOC-1"] == receipt
+                assert row["doc_map"] == {"DOC-1": receipt}
+                assert row["disclosures"] == [{"source": "DOC-1", "title": "공시", "text": ""}]
+                assert row["card"]["stock_code"] == row["stock_code"] and row["news"] == []
             summary, evidence = state["final_report"].split(stock_analysis.EVIDENCE_HEADING)
             assert "[DOC-1]과 [DOC-3]에 근거한 진단입니다." in summary
-            assert f"rcpNo={RECEIPT[:-1]}2" in evidence and f"rcpNo={RECEIPT[:-1]}4" in evidence
+            assert f"rcpNo={RECEIPT[:-1]}4" in evidence and f"rcpNo={RECEIPT[:-1]}2" in evidence
+            assert f"rcpNo={RECEIPT[:-1]}3" not in evidence
             assert state["quant_scorecards"]["000001"]["total"] == 90
     asyncio.run(check())
+    assert price_card.get_or_build_card.await_count == 6
     llm.ChatOpenAI.assert_not_called()
 
 
@@ -283,18 +312,20 @@ def test_guardrail_rejects_malformed_worker_independently():
     invalid = {"stock_code": "bad", "analysis_text": [], "citations": "DOC-1", "doc_map": {}}
     valid = {"stock_code": "ok", "analysis_text": "[DOC-1] 자료입니다.",
              "citations": ["DOC-1"], "doc_map": {"DOC-1": RECEIPT}}
-    result = stock_analysis.verify_results([invalid, valid])
+    result = stock_analysis.verify_results([invalid, valid], allowed=set())
     assert [row["stock_code"] for row in result["verified_stock_results"]] == ["ok"]
-    assert result["verified_stock_results"][0]["citations"] == [RECEIPT]
+    assert result["verified_stock_results"][0]["citations"] == ["DOC-1"]
     assert len(result["guardrail_warnings"]) == 1
 
 
 def test_guardrail_citations_at_sentence_end():
-    worker = {"stock_code": "ok", "analysis_text": "희석률은 3.5%다 [DOC-1]. 가짜다 [DOC-99].",
-              "citations": ["DOC-1", "DOC-99"], "doc_map": {"DOC-1": RECEIPT}}
-    result = stock_analysis.verify_results([worker])
-    assert result["verified_stock_results"][0]["analysis_text"] == f"희석률은 3.5%다 [{RECEIPT}]."
-    assert len(result["guardrail_warnings"]) == 1
+    worker = {"stock_code": "ok", "analysis_text": "희석률은 3.5%다 [DOC-1]. 가짜다 [NEWS-9]. 근거는 [P-2]다.",
+              "citations": ["DOC-1", "NEWS-9"], "doc_map": {"DOC-1": RECEIPT, "P-2": "P-2"}}
+    result = stock_analysis.verify_results([worker], allowed={D("3.5")})
+    row = result["verified_stock_results"][0]
+    assert row["analysis_text"] == "희석률은 3.5%다 [DOC-1]. 근거는 [P-2]다."
+    assert row["citations"] == ["DOC-1", "P-2"]
+    assert result["guardrail_warnings"] == ["ok 미등록 인용 제외 (NEWS-9)"]
 
 
 @pytest.mark.parametrize("virtual", [True, False])
@@ -340,24 +371,27 @@ def test_health_and_request_boundary():
     async def check():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             assert (await client.get("/health")).json() == {"status": "ok"}
-            for payload in ({"user_query": "  "}, {"user_query": "잔고", "stock_analysis_results": [{}]}):
+            for payload in ({"user_query": "  "}, {"user_query": "잔고", "stock_analysis_results": [{}]},
+                            {"user_query": "잔고", "selected_stock_code": "00593"},
+                            {"user_query": "잔고", "selected_stock_code": "005930;"}):
                 response = await client.post("/api/v1/chat/stream", json=payload)
                 assert response.status_code == 422
     asyncio.run(check())
 
-def test_cloud_prompt_allows_only_masked_indicators_and_disclosures(monkeypatch):
-    stock = replace(position(), quantity=D("812345"), market_value=D("987654321"))
+def test_answer_prompt_carries_cards_by_tag_and_never_a_receipt(monkeypatch):
+    stock = position()
     market = setup_market(monkeypatch, [stock])
-    market.broker.get_balance.return_value = Balance(D("987123456"), D("1974777777"), D("0.50"), (stock,))
-    query = "계좌 87654321-01의 812345주, 평가액 987654321원, 예수금 987123456원 위험 진단"
+    query = f"{stock.name} 위험 진단"
     state = asyncio.run(build_graph(market).ainvoke({"user_query": query}))
     assert stock_analysis.ANSWER_HEADING in state["final_report"]
     synthesis = llm.ChatGoogleGenerativeAI.return_value.with_structured_output.return_value.ainvoke
-    portfolio = json.loads(synthesis.await_args.args[0][-1][1])
-    assert portfolio == [{"name": stock.name, "weight_pct": "20.0", "profit_loss_pct": "-16.67", "scorecard": 90,
-                          "disclosures": [{"source": "DOC-1", "title": "발행결정", "text": "희석률은 3.5%다."}]}]
-    for secret in ("87654321", "812345", "987654321", "987123456", "1974777777", RECEIPT):
-        assert secret not in str(synthesis.await_args)
+    context = json.loads(synthesis.await_args.args[0][-1][1])
+    assert set(context) == {"question", "account", "cards", "simulation"} and context["question"] == query
+    card = context["cards"][0]
+    assert card["docs"] == [{"id": "DOC-1", "title": "발행결정"}]
+    assert card["levels"]["buy_zone"]["reason"] == "[P-2] 20일선 지지 [DOC-1]"
+    # Receipts stay local: the model cites [DOC-n] and the report links the receipt.
+    assert RECEIPT not in str(synthesis.await_args)
     llm.ChatOpenAI.assert_not_called()
 
 
@@ -402,13 +436,13 @@ def test_total_llm_outage_streams_scores_simulation_and_disclosure_evidence(monk
     assert done["ok"] and done["quant_scorecards"][stock.stock_code]["total"] == 90
     assert done["quant_scorecards"][stock.stock_code]["dilution_pct"] == "0.1"
     assert done["simulation_result"]["buy_quantity"] == "2"
-    assert done["verified_stock_results"][0]["evidence"] == {"DOC-1": RECEIPT}
+    assert done["verified_stock_results"][0]["doc_map"] == {"DOC-1": RECEIPT}
     report = "".join(data["text"] for kind, data in frames if kind == "token")
     assert report == done["final_report"] and "90/100" in report and "DOC-1" in report and RECEIPT in report
     warnings = done["guardrail_warnings"]
     assert len(warnings) == 1
     reason = "API키 미설정" if missing_keys else "응답 시간초과"
-    assert any("종합 LLM" in warning and f"[{reason}]" in warning for warning in warnings)
+    assert warnings == [f"답변 모델을 사용할 수 없어 로컬 정량 리포트를 제공합니다. [{reason}]"]
     assert "private-provider-detail" not in str(frames)
     if missing_keys:
         llm.ChatOpenAI.assert_not_called()
@@ -444,7 +478,8 @@ def test_done_event_exposes_every_public_state_field_and_no_internal_one():
     from backend.main import PUBLIC_FIELDS
     from backend.portfolio_graph import PortfolioState
 
-    internal = {"user_query", "stock_analysis_results", "balance", "as_of", "score_inputs"}
+    internal = {"user_query", "selected_stock_code", "stock_analysis_results", "balance", "as_of",
+                "score_inputs"}
     assert set(PUBLIC_FIELDS) == set(PortfolioState.__annotations__) - internal
 
 
@@ -470,8 +505,8 @@ def test_one_failing_source_degrades_only_its_holding(monkeypatch):
     assert done["quant_scorecards"]["000002"] == {"status": "unavailable"}
     card = done["quant_scorecards"]["000001"]
     assert card["scores"]["flow"] is not None and card["scores"]["earnings"] is None and card["total"] is None
-    # Only the holding with score inputs is fanned out; the other keeps its broker mapping.
-    assert [row["stock_code"] for row in done["verified_stock_results"]] == ["000001"]
+    # A holding without score inputs still gets a card; it keeps its broker mapping.
+    assert [row["stock_code"] for row in done["verified_stock_results"]] == ["000002", "000001"]
     assert {row["stock_code"]: row["asset_type"] for row in done["holdings"]} == {"000001": "STOCK", "000002": "STOCK"}
     warnings = done["guardrail_warnings"]
     assert "종목000002 최근 5거래일 확정 수급을 불러오지 못해 정량 점수에서 제외했습니다." in warnings
@@ -481,16 +516,15 @@ def test_one_failing_source_degrades_only_its_holding(monkeypatch):
     assert "종목000002" in done["final_report"]
 
 
-def test_disclosure_search_failure_degrades_only_its_worker(monkeypatch):
-    # e.g. a laptop dGPU switched off: bge-m3 cannot load, but scores and the simulation still stand.
+def test_card_failure_degrades_only_its_worker(monkeypatch):
     market = setup_market(monkeypatch, [position("000001", weight="0.3"), position("000002", weight="0.4")])
 
-    async def search(corp_code, query):
-        if corp_code.endswith("2"):
-            raise RuntimeError("DART RAG inference requires a CUDA GPU")
-        return [{"rcept_no": RECEIPT, "report_nm": "발행결정", "chunk_text": "희석률은 3.5%다."}]
+    async def card(market, code):
+        if code == "000002":
+            raise RuntimeError("private-provider-detail")
+        return card_fixture(code, "종목" + code, warnings=["AI 분석을 사용할 수 없어 기본 계산을 사용했습니다."])
 
-    dart_rag.search.side_effect = search
+    price_card.get_or_build_card.side_effect = card
 
     async def stream():
         return [parse_frame(frame) async for frame in chat_events(build_graph(market), "포트폴리오 위험 진단")]
@@ -498,9 +532,13 @@ def test_disclosure_search_failure_degrades_only_its_worker(monkeypatch):
     events = asyncio.run(stream())
     event, done = events[-1]
     assert event == "done" and done["ok"] is True
-    assert [row["stock_code"] for row in done["verified_stock_results"]] == ["000002", "000001"]
-    assert "000002 종목 공시 검색을 사용할 수 없어 공시 근거 없이 분석했습니다." in done["guardrail_warnings"]
-    assert not any(w.startswith("000001 종목 공시 검색") for w in done["guardrail_warnings"])
+    rows = {row["stock_code"]: row for row in done["verified_stock_results"]}
+    assert rows["000002"]["card"] is None and rows["000002"]["doc_map"] == {}
+    assert rows["000001"]["card"]["stock_code"] == "000001"
+    warnings = done["guardrail_warnings"]
+    assert "종목000002 가격 카드를 만들 수 없어 카드 없이 답변합니다." in warnings
+    assert "종목000001 가격 카드: AI 분석을 사용할 수 없어 기본 계산을 사용했습니다." in warnings
+    assert "private-provider-detail" not in str(events)
     assert done["final_report"]
 
 
