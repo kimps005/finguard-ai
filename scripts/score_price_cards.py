@@ -22,9 +22,11 @@ from backend.toss_broker import TossSettings, toss_account
 logger = logging.getLogger("score_price_cards")
 # The window grows toward the confirmed day, so a long holiday cluster only delays scoring; capped at this span.
 MAX_FETCH_DAYS = 45
-METRICS = (("low_held", "local_low_held"), ("high_reached", "local_high_reached"),
-           ("ceiling_held", "local_ceiling_held"))
-RESULT_COLUMNS = tuple(column for pair in METRICS for column in pair)
+# (AI column, local column, the level's source column). A level whose source is 'local' carries the
+# local price in its AI column, so AI rates count only rows where that level came from the analyst.
+METRICS = (("low_held", "local_low_held", "low_source"), ("high_reached", "local_high_reached", "high_source"),
+           ("ceiling_held", "local_ceiling_held", "ceiling_source"))
+RESULT_COLUMNS = tuple(column for ai, local, _ in METRICS for column in (ai, local))
 
 
 async def unscored_rows(confirmed: date) -> list[dict]:
@@ -85,9 +87,13 @@ async def summary_rows() -> list[dict]:
 
 
 def summary_table(rows: list[dict]) -> str:
-    lines = [f"scored cards: {len(rows)}", f"{'metric':<14}{'AI card':>20}{'local':>20}"]
-    for ai, local in METRICS:
-        lines.append(f"{ai:<14}{hit_rate(rows, ai):>20}{hit_rate(rows, local):>20}")
+    """AI rate over AI-sourced levels, local rate over the same rows, and local rate over every row."""
+    lines = [f"scored cards: {len(rows)}",
+             f"{'metric':<14}{'AI (AI levels)':>20}{'local (same)':>20}{'local (all)':>20}"]
+    for ai, local, source in METRICS:
+        sourced = [row for row in rows if row.get(source) == "ai"]
+        lines.append(f"{ai:<14}{hit_rate(sourced, ai):>20}{hit_rate(sourced, local):>20}"
+                     f"{hit_rate(rows, local):>20}")
     return "\n".join(lines)
 
 

@@ -130,9 +130,10 @@ def test_summary_table_reports_ai_and_local_rates():
         "score_price_cards", Path(__file__).parents[1] / "scripts" / "score_price_cards.py")
     script = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(script)
-    rows = [{"low_held": True, "local_low_held": False, "high_reached": False, "local_high_reached": False,
+    ai = {"low_source": "ai", "high_source": "ai", "ceiling_source": "ai"}
+    rows = [{**ai, "low_held": True, "local_low_held": False, "high_reached": False, "local_high_reached": False,
              "ceiling_held": True, "local_ceiling_held": True},
-            {"low_held": True, "local_low_held": True, "high_reached": True, "local_high_reached": False,
+            {**ai, "low_held": True, "local_low_held": True, "high_reached": True, "local_high_reached": False,
              "ceiling_held": False, "local_ceiling_held": True}]
     table = script.summary_table(rows)
     assert "scored cards: 2" in table
@@ -173,3 +174,59 @@ def test_holiday_gap_scores_once_ten_sessions_exist():
     bars = sessions(1, 2, 3, 4, 5, 6, 7, 8, 21, 29)
     assert card_log.score_window(ROW, script.window_bars(AS_OF, bars, AS_OF + timedelta(days=22))) is None
     assert card_log.score_window(ROW, script.window_bars(AS_OF, bars, AS_OF + timedelta(days=30))) is not None
+
+
+def test_summary_rates_ai_levels_only_over_ai_sourced_rows():
+    script = load_script()
+    ai = {"low_source": "ai", "high_source": "ai", "ceiling_source": "ai"}
+    rows = [
+        {**ai, "low_held": True, "local_low_held": False, "high_reached": True, "local_high_reached": False,
+         "ceiling_held": True, "local_ceiling_held": True},
+        # Low fell back to the local level: its AI column equals the local value and must not count.
+        {**ai, "low_source": "local", "low_held": False, "local_low_held": False,
+         "high_reached": False, "local_high_reached": True, "ceiling_held": True, "local_ceiling_held": True},
+        {"low_source": "local", "high_source": "local", "ceiling_source": "local",
+         "low_held": False, "local_low_held": False, "high_reached": False, "local_high_reached": False,
+         "ceiling_held": False, "local_ceiling_held": False},
+    ]
+    lines = {line.split()[0]: line for line in script.summary_table(rows).splitlines()[2:]}
+    # AI over AI-sourced rows only; local over the same rows, then over every scored row.
+    assert lines["low_held"].split()[1:] == ["100.0%", "(1/1)", "0.0%", "(0/1)", "0.0%", "(0/3)"]
+    assert lines["high_reached"].split()[1:] == ["50.0%", "(1/2)", "50.0%", "(1/2)", "33.3%", "(1/3)"]
+    assert lines["ceiling_held"].split()[1:] == ["100.0%", "(2/2)", "100.0%", "(2/2)", "66.7%", "(2/3)"]
+
+
+def test_gemini_fallback_analyst_records_the_gemini_model(monkeypatch):
+    from unittest.mock import Mock
+
+    import httpx
+    from openai import APIStatusError
+
+    from backend.card_validation import CardAnalysis
+    from test_module6_langgraph import gemini_result
+
+    build = analyst().side_effect
+
+    async def gemini_call(messages, **kwargs):
+        return gemini_result(await build("analyst", messages[0][1], messages[1][1], CardAnalysis,
+                                         timeout=price_card.ANALYST_TIMEOUT))
+
+    patch(monkeypatch, price_card.llm.invoke)
+    for key in ("ANALYST_MODEL", "FALLBACK_MODEL", "DASHSCOPE_BASE_URL"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dash-test")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test")
+    error = APIStatusError("rate limited", response=httpx.Response(429, request=httpx.Request("POST", "https://t")),
+                           body={})
+    dash, google = Mock(), Mock()
+    dash.return_value.with_structured_output.return_value.ainvoke = AsyncMock(side_effect=error)
+    google.return_value.with_structured_output.return_value.ainvoke = AsyncMock(side_effect=gemini_call)
+    monkeypatch.setattr(price_card.llm, "ChatOpenAI", dash)
+    monkeypatch.setattr(price_card.llm, "ChatGoogleGenerativeAI", google)
+    record = AsyncMock()
+    monkeypatch.setattr(price_card, "record_card", record)
+
+    snapshots = asyncio.run(collect(card_updates(card_market(), "005930")))
+    assert snapshots[-1]["band"]["ai_status"] == "ai"
+    assert dash.call_args.kwargs["model"] == "qwen3.7-plus"
+    assert record.await_args.args[-1] == "gemini-3.8-flash"

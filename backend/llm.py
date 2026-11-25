@@ -1,6 +1,7 @@
 """Provider selection and failure isolation for the portfolio graph and evaluation."""
 
 import asyncio
+from contextvars import ContextVar
 import json
 import logging
 import os
@@ -23,6 +24,9 @@ DEFAULTS = {"analyst": "qwen3.7-plus", "answer": "qwen3.8-flash",
 BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 QWEN_THINKING_BUDGET = 2048
 logger = logging.getLogger(__name__)
+# The model that produced the last successful invoke() in this context: the role's DashScope model,
+# or the Gemini model it fell back to. Callers that log the answering model read it right after awaiting.
+last_model: ContextVar[str | None] = ContextVar("last_model", default=None)
 
 
 class LLMUnavailable(Exception):
@@ -170,7 +174,9 @@ async def invoke(role: Role, instruction: str, context: str, schema, *, timeout:
     try:
         if not model.startswith("gemini") and key:
             try:
-                return await invoke_dashscope(model, key, messages, schema, timeout=timeout)
+                result = await invoke_dashscope(model, key, messages, schema, timeout=timeout)
+                last_model.set(model)
+                return result
             except Exception as exc:
                 if not fallback_error(exc):
                     raise
@@ -178,7 +184,9 @@ async def invoke(role: Role, instruction: str, context: str, schema, *, timeout:
             model = model_name("fallback")
         elif not model.startswith("gemini"):
             model = model_name("fallback")
-        return await invoke_gemini(role, model, messages, schema, timeout=timeout)
+        result = await invoke_gemini(role, model, messages, schema, timeout=timeout)
+        last_model.set(model)
+        return result
     except Exception as exc:
         log_failure(role, model, exc)
         raise LLMUnavailable(f"{role} unavailable", reason=failure_reason(exc)) from exc

@@ -312,6 +312,7 @@ async def built_card(market, stock, now, key, band, facts, holding) -> dict:
     news, docs, retrieved = await reference_inputs(market, stock, now)
     materials = build_materials(band, facts, news, docs, stock, holding)
 
+    llm.last_model.set(None)
     try:
         analysis = await llm.invoke("analyst", ANALYST_PROMPT, analyst_context(stock, now, materials, holding),
                                     CardAnalysis, timeout=ANALYST_TIMEOUT)
@@ -328,7 +329,8 @@ async def built_card(market, stock, now, key, band, facts, holding) -> dict:
     except Exception as exc:
         logger.warning("Price card cache write failed (%s)", type(exc).__name__)
     # The log feeds the hit-rate script only; a database failure never reaches the stream.
-    model = "local" if final["band"]["ai_status"] == "local" else llm.model_name("analyst")
+    # The model that actually answered: DashScope's analyst model or the Gemini fallback.
+    model = "local" if final["band"]["ai_status"] == "local" else llm.last_model.get() or llm.model_name("analyst")
     await optional_data(record_card(stock.stock_code, confirmed_day(now), final["band"], local, materials.atr,
                                     model), 3)
     return final
