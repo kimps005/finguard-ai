@@ -13,7 +13,8 @@ from backend.stock_analysis import cited_sentences
 LEVELS = ("low", "high", "ceiling")
 LEVEL_NAMES = {"low": "단기 저점", "high": "단기 고점", "ceiling": "단기 천장"}
 ATR_WARNING = "변동성 자료 부족으로 기본 계산을 사용했습니다."
-_UNIT_NUMBER = re.compile(r"(?<![0-9.,])([0-9][0-9,]*(?:\.[0-9]+)?)\s?(?:원|주|%)")
+_NUMBER = re.compile(r"(?<![0-9.,A-Za-z-])([0-9][0-9,]*(?:\.[0-9]+)?)(?:\s?([천만억]))?(?:\s?(원|주|%))?(년)?")
+_MULTIPLIER = {"천": Decimal(1000), "만": Decimal(10000), "억": Decimal(10) ** 8}
 
 
 class LevelProposal(BaseModel):
@@ -69,7 +70,13 @@ def _known_tags(m: Materials) -> set[str]:
 def _text_ok(text: str, m: Materials, allowed: set[Decimal]) -> bool:
     if RECEIPT.search(text) or any(tag not in _known_tags(m) for tag in TAG.findall(text)):
         return False
-    return all(Decimal(n.replace(",", "")) in allowed for n in _UNIT_NUMBER.findall(text))
+    for raw, mult, unit, year in _NUMBER.findall(text):
+        digits = raw.replace(",", "")
+        if not (unit or mult) and (year or not ("," in raw or len(digits.split(".")[0]) >= 4)):
+            continue  # plain small number or a year, not a price-like figure
+        if Decimal(digits) * _MULTIPLIER.get(mult, Decimal(1)) not in allowed:
+            return False
+    return True
 
 
 def _distance(price: Decimal, fact: Fact) -> Decimal:
@@ -84,6 +91,8 @@ def _level_ok(p: LevelProposal, m: Materials, allowed: set[Decimal]) -> Decimal 
     price = round_to_tick(parsed, m.asset_type)
     atr = m.atr
     if abs(price - m.current) > 4 * atr:
+        return None
+    if any(t not in _known_tags(m) for t in p.basis):
         return None
     facts = {f.id: f for f in m.facts}
     anchors = [facts[t] for t in p.basis if t.startswith("P-") and t in facts]

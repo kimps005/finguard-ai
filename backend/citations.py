@@ -5,8 +5,8 @@ import re
 
 ALIAS = re.compile(r"DOC-[0-9]+")
 CITATION_MARK = re.compile(r"\[DOC-[0-9]+\]|" + ALIAS.pattern)
-TAG = re.compile(r"\b(?:DOC|NEWS|P)-[1-9][0-9]*\b")
-TAG_MARK = re.compile(r"\[(?:DOC|NEWS|P)-[1-9][0-9]*\]")
+TAG = re.compile(r"(?<![A-Za-z0-9])(?:DOC|NEWS|P)-[0-9]+(?![0-9])")
+TAG_MARK = re.compile(r"\[(?:DOC|NEWS|P)-[0-9]+\]")
 RECEIPT = re.compile(r"(?<![0-9])[0-9]{14}(?![0-9])")
 RECEIPT_PLACEHOLDER = "(공시번호 생략)"
 

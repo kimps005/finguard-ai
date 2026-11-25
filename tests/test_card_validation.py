@@ -167,3 +167,30 @@ def test_tagbook_renumbers_per_kind_across_cards():
     assert book.alias("NEWS", "b") == "NEWS-2"
     assert book.alias("NEWS", "a") == "NEWS-1"
     assert book.rewrite("[NEWS-1] x [P-3]", {"NEWS-1": "NEWS-2"}) == "[NEWS-2] x [P-3]"
+
+
+def test_unbracketed_tag_before_hangul_is_detected():
+    bad = validate_card(proposal(low=("2982", ["P-2"], "NEWS-9에 따르면 지지")), M, LOCAL)
+    assert bad["levels"]["low"]["source"] == "local"
+    good = validate_card(proposal(low=("2982", ["P-2"], "NEWS-1에 따르면 지지")), M, LOCAL)
+    assert good["levels"]["low"]["source"] == "ai"
+    assert [n["alias"] for n in good["news"]] == ["NEWS-1"]
+    zero = validate_card(proposal(low=("2982", ["P-2"], "NEWS-0 따르면 지지")), M, LOCAL)
+    assert zero["levels"]["low"]["source"] == "local"
+    assert TagBook().rewrite("NEWS-1에 따르면", {"NEWS-1": "NEWS-4"}) == "NEWS-4에 따르면"
+
+
+def test_level_basis_must_be_all_existing_tags():
+    card = validate_card(proposal(low=("2982", ["P-2", "P-99", "목표 5,000원"])), M, LOCAL)
+    assert card["levels"]["low"]["source"] == "local"
+    assert validate_card(proposal(low=("2982", ["P-2", "NEWS-1"])), M, LOCAL)["levels"]["low"]["source"] == "ai"
+
+
+def test_number_guard_covers_multipliers_and_unitless_prices():
+    card = validate_card(proposal(summary="NEWS-1에 따르면 저점은 2,850선입니다. 2026년 실적은 양호합니다. 저항은 3,168선입니다."), M, LOCAL)
+    assert "2,850" not in card["summary"]
+    assert "2026년" in card["summary"] and "3,168선" in card["summary"]
+    for text in ("목표 3천원입니다.", "목표 1.5만원입니다.", "목표 3500입니다."):
+        assert validate_card(proposal(summary=text), M, LOCAL)["summary"] == "", text
+    m = Materials(facts=FACTS, news=NEWS, docs=DOCS, current=D(3100), atr=D(60), extra_numbers={D(3000)})
+    assert validate_card(proposal(summary="기준 3천원입니다."), m, LOCAL)["summary"] == "기준 3천원입니다."
