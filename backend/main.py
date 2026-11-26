@@ -22,6 +22,7 @@ from backend.price_bands import StockPriceUnavailable, price_band_updates, stock
 from backend.report import account_view
 from backend.serialization import dump
 from backend.stock_master import search_stocks
+from backend.timing import timed
 from backend.toss_broker import TossSettings, toss_account
 
 
@@ -173,25 +174,26 @@ async def chat_events(graph, query, selected_stock_code=None):
     request = {"user_query": query,
                "selected_stock_code": selected_stock_code.upper() if selected_stock_code else None}
     try:
-        async for mode, data in graph.astream(
-            request, stream_mode=["tasks", "custom", "values"], output_keys=PUBLIC_FIELDS,
-        ):
-            if mode == "tasks":
-                node = data["name"]
-                started = "input" in data
-                if node.startswith("__") or (started and node == "router_node"):
-                    continue
-                phase = "started" if started else ("failed" if data.get("error") else "completed")
-                status = {"node": node, "phase": phase, "task_id": data["id"]}
-                if started and node == "stock_worker":
-                    # Name the stock once; the client keeps it for this task's later phases.
-                    job = data["input"]
-                    status.update(stock_code=job["stock_code"], stock_name=job["name"])
-                yield sse("status", status)
-            elif mode == "custom":
-                yield sse("token", data)
-            elif mode == "values":
-                final = data
+        with timed("chat.total"):
+            async for mode, data in graph.astream(
+                request, stream_mode=["tasks", "custom", "values"], output_keys=PUBLIC_FIELDS,
+            ):
+                if mode == "tasks":
+                    node = data["name"]
+                    started = "input" in data
+                    if node.startswith("__") or (started and node == "router_node"):
+                        continue
+                    phase = "started" if started else ("failed" if data.get("error") else "completed")
+                    status = {"node": node, "phase": phase, "task_id": data["id"]}
+                    if started and node == "stock_worker":
+                        # Name the stock once; the client keeps it for this task's later phases.
+                        job = data["input"]
+                        status.update(stock_code=job["stock_code"], stock_name=job["name"])
+                    yield sse("status", status)
+                elif mode == "custom":
+                    yield sse("token", data)
+                elif mode == "values":
+                    final = data
         if "final_report" not in final:
             raise RuntimeError("Graph ended before synthesis")
         yield sse("done", {"ok": True, **{k: final[k] for k in PUBLIC_FIELDS}})

@@ -19,6 +19,7 @@ from backend.broker import Balance
 from backend.finance_calc import calculate_scorecard, simulate_purchase
 from backend.portfolio_market import MarketData, ScoreInputs
 from backend.report import account_view, answer_report, diagnosis_report, quote_parts
+from backend.timing import timed
 
 
 logger = logging.getLogger(__name__)
@@ -144,7 +145,8 @@ def build_graph(market: MarketData):
         return account_view(await market.broker.get_balance())
 
     async def market_data_node(state):
-        balance, on, macro, inputs, warnings = await market.collect()
+        with timed("chat.market_data"):
+            balance, on, macro, inputs, warnings = await market.collect()
         view = account_view(balance)
         # Public rows carry the mapping the score inputs were collected with. A holding without
         # inputs keeps the broker's mapping; fan-out skips it because it has no score_inputs.
@@ -189,9 +191,10 @@ def build_graph(market: MarketData):
             warning = None
             try:
                 # Bound the wait for the analyst; the build keeps running and caches its card for the next request.
-                async with asyncio.timeout(CARD_WAIT_SECONDS):
-                    async for update in updates:
-                        band = update["band"]
+                with timed("chat.card_wait", code=code):
+                    async with asyncio.timeout(CARD_WAIT_SECONDS):
+                        async for update in updates:
+                            band = update["band"]
             except TimeoutError:
                 logger.warning("Price card analysis for chat timed out; answering with the local card")
                 warning = f"{label} {SLOW_CARD_WARNING}"
@@ -224,7 +227,8 @@ def build_graph(market: MarketData):
             report = None
             if state["holdings"] or state["verified_stock_results"]:
                 try:
-                    core, sources, notes = await stock_analysis.answer(state, account_numbers(market.broker))
+                    with timed("chat.answer"):
+                        core, sources, notes = await stock_analysis.answer(state, account_numbers(market.broker))
                     warnings.extend(notes)
                     report = answer_report(state, core, sources)
                 except llm.LLMUnavailable as exc:

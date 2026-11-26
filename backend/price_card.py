@@ -17,6 +17,7 @@ from backend.price_bands import (
 )
 from backend.serialization import dump
 from backend.stock_master import fetch_stocks
+from backend.timing import measured, timed
 
 
 logger = logging.getLogger(__name__)
@@ -143,8 +144,9 @@ async def reference_inputs(market, stock, now) -> tuple[dict, dict, dict]:
     for the answer model; the card itself lists only what the analyst cited.
     """
     articles, chunks = await asyncio.gather(
-        optional_data(market.external.get_news(stock.corp_name, limit=NEWS_LIMIT), 8, default=[]),
-        disclosure_rows(market, stock, now),
+        measured("card.news", optional_data(market.external.get_news(stock.corp_name, limit=NEWS_LIMIT), 8,
+                                            default=[]), code=stock.stock_code),
+        measured("card.disclosures", disclosure_rows(market, stock, now), code=stock.stock_code),
     )
     news = {}
     for index, article in enumerate((articles or [])[:NEWS_LIMIT], 1):
@@ -289,8 +291,8 @@ async def card_updates(market, stock_code: str):
         return
 
     # The local card goes out before news, DART and the lock so the screen never waits on them.
-    holding, (band, facts) = await asyncio.gather(held_position(broker, stock_code),
-                                                  chart_inputs(market, stock, now))
+    holding, (band, facts) = await asyncio.gather(
+        held_position(broker, stock_code), measured("card.chart", chart_inputs(market, stock, now), code=stock_code))
     local = local_levels(band)
     yield snapshot(now, band, facts, local_card(local))
 
@@ -307,9 +309,10 @@ async def card_updates(market, stock_code: str):
 
 
 async def final_card(market, stock, now, key, band, facts, holding) -> dict:
-    async with asyncio.timeout(BUILD_TIMEOUT):
-        return await cached_card(market.broker, key) or await built_card(
-            market, stock, now, key, band, facts, holding)
+    with timed("card.build", code=stock.stock_code):
+        async with asyncio.timeout(BUILD_TIMEOUT):
+            return await cached_card(market.broker, key) or await built_card(
+                market, stock, now, key, band, facts, holding)
 
 
 def finish_build(key, task):
@@ -343,7 +346,8 @@ async def built_card(market, stock, now, key, band, facts, holding) -> dict:
         logger.warning("Analyst card unavailable (%s)", exc.reason)
         analysis = None
     # Kiwi sentence splitting is CPU-bound; keep it off the event loop.
-    card = await asyncio.to_thread(validate_card, analysis, materials, local)
+    with timed("card.validate", code=stock.stock_code):
+        card = await asyncio.to_thread(validate_card, analysis, materials, local)
     final = snapshot(now, band, facts, card, retrieved)
     # A local-only card is kept briefly so the next selection retries the analyst.
     ttl = min(card_ttl(now), SESSION_TTL) if final["band"]["ai_status"] == "local" else card_ttl(now)

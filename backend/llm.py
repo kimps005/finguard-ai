@@ -17,6 +17,8 @@ from langchain_openai import ChatOpenAI
 from openai import APITimeoutError
 from pydantic import ValidationError
 
+from backend.timing import timed
+
 
 Role = Literal["analyst", "answer", "judge"]
 DEFAULTS = {"analyst": "qwen3.7-plus", "answer": "qwen3.8-flash",
@@ -177,7 +179,8 @@ async def invoke(role: Role, instruction: str, context: str, schema, *, timeout:
     try:
         if not model.startswith("gemini") and key:
             try:
-                result = await invoke_dashscope(role, model, key, messages, schema, timeout=timeout)
+                with timed("llm", role=role, model=model):
+                    result = await invoke_dashscope(role, model, key, messages, schema, timeout=timeout)
                 last_model.set(model)
                 return result
             except Exception as exc:
@@ -188,7 +191,8 @@ async def invoke(role: Role, instruction: str, context: str, schema, *, timeout:
             timeout = min(timeout, FALLBACK_TIMEOUT)
         elif not model.startswith("gemini"):
             model = model_name("fallback")
-        result = await invoke_gemini(role, model, messages, schema, timeout=timeout)
+        with timed("llm", role=role, model=model):
+            result = await invoke_gemini(role, model, messages, schema, timeout=timeout)
         last_model.set(model)
         return result
     except Exception as exc:
