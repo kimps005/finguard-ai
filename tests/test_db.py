@@ -2,6 +2,7 @@ import asyncio
 import sys
 
 import psycopg
+from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 import pytest
 
@@ -22,7 +23,8 @@ def pooled(database):
     with psycopg.connect(dsn, autocommit=True) as conn:
         conn.execute(f"SET search_path TO {schema}, public")
         conn.execute("TRUNCATE stock_master")
-    return f"{dsn} options='-c search_path={schema},public'"
+    # The DSN may be a URI (embedded_postgres); appending "key=value" text to it is invalid.
+    return make_conninfo(dsn, options=f"-c search_path={schema},public")
 
 
 def test_pool_commits_rolls_back_and_resets_connection_state(pooled):
