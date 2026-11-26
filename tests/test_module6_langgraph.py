@@ -592,3 +592,22 @@ def test_guardrail_keeps_compound_man_won_figures_that_are_listed():
     result = stock_analysis.verify_results([worker], allowed={D(1014000)}, near=[D(1030000)])
     assert result["verified_stock_results"][0]["analysis_text"] == "저점은 101만4000원입니다 [P-2]."
     assert result["guardrail_warnings"] == ["ok 입력에 없는 수치가 있는 문장 1개를 제외했습니다."]
+
+
+def test_account_snapshot_starts_the_cards_a_portfolio_question_would_wait_on(monkeypatch):
+    positions = [position("000001", weight="0.1"), position("000002", weight="0.4"),
+                 position("000003", asset="ETF", weight="0.3"), position("000004", weight="0.2"),
+                 position("000005", weight="0.05")]
+    market = setup_market(monkeypatch, positions)
+    market.broker.get_orderable_cash.return_value = D("900.12")
+    monkeypatch.setattr(app.state, "market", market, raising=False)
+    warm = Mock()
+    monkeypatch.setattr(price_card, "warm_cards", warm)
+
+    async def get_snapshot():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            return await client.get("/api/v1/account")
+
+    assert asyncio.run(get_snapshot()).status_code == 200
+    # Same order as target_codes for a question naming no holding: heaviest STOCK holdings, at most three.
+    warm.assert_called_once_with(market, ["000002", "000004", "000001"])

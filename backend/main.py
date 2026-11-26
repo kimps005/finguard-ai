@@ -11,12 +11,12 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, StringConstraints
 from redis.exceptions import RedisError
 
-from backend import dart_rag, db
+from backend import dart_rag, db, price_card
 from backend.broker import BrokerConfigurationError, BrokerConnector, BrokerError
 from backend.connectors import ExternalConnectors
 from backend.dart_etl import DartETL
 from backend.market_time import candle_poll_delay
-from backend.portfolio_graph import build_graph
+from backend.portfolio_graph import build_graph, target_codes
 from backend.portfolio_market import MarketData
 from backend.price_bands import StockPriceUnavailable, price_band_updates, stock_price_band_updates
 from backend.report import account_view
@@ -77,6 +77,8 @@ async def lifespan(app: FastAPI):
             yield
         finally:
             warm_task.cancel()
+            for task in list(price_card.card_warmups.values()):
+                task.cancel()
             if krx_task:
                 krx_task.cancel()
             await app.state.dart_etl.close()
@@ -107,6 +109,8 @@ async def account_snapshot(request: Request):
         return JSONResponse({"code": "account_lookup_failed"}, status_code=502,
                             headers={"Cache-Control": "no-store"})
     snapshot = account_view(balance)
+    # The dashboard loads the account once after unlock; start the cards its first question will use.
+    price_card.warm_cards(market, target_codes({"user_query": "", "holdings": snapshot["holdings"]}))
     orderable_cash = None
     try:
         orderable_cash = await market.orderable_cash()

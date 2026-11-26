@@ -555,3 +555,30 @@ def test_hung_build_is_capped_and_its_key_freed(monkeypatch, caplog):
     with caplog.at_level("WARNING", logger=price_card.logger.name):
         assert asyncio.run(scenario()) is False
     assert "Price card build failed (TimeoutError)" in caplog.text
+
+
+def test_warm_cards_builds_each_code_once_and_logs_failures(monkeypatch, caplog):
+    calls, release = [], asyncio.Event()
+
+    async def build(market, code):
+        calls.append(code)
+        await release.wait()
+        if code == "000660":
+            raise price_card.StockPriceUnavailable("없음")
+        return {}
+
+    monkeypatch.setattr(price_card, "get_or_build_card", build)
+
+    async def run():
+        price_card.warm_cards("market", ["005930", "000660"])
+        price_card.warm_cards("market", ["005930"])  # already warming: no second build
+        await asyncio.sleep(0)
+        assert set(price_card.card_warmups) == {"005930", "000660"}
+        release.set()
+        await asyncio.gather(*price_card.card_warmups.values())
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+    assert calls == ["005930", "000660"]
+    assert price_card.card_warmups == {}
+    assert "Price card warm-up failed (StockPriceUnavailable)" in caplog.text

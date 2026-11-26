@@ -363,6 +363,29 @@ async def built_card(market, stock, now, key, band, facts, holding) -> dict:
     return final
 
 
+# Background builds started from the account screen, one per stock code. A chat soon after finds the card
+# cached or joins the same build in card_builds instead of waiting ~30s for the analyst from scratch.
+card_warmups: dict[str, asyncio.Task] = {}
+
+
+def warm_cards(market, codes) -> None:
+    """Start the cards a portfolio question would wait on; a code already warming is skipped."""
+    for code in codes:
+        if code in card_warmups:
+            continue
+        task = asyncio.create_task(_warm_card(market, code), name=f"price-card-warmup:{code}")
+        card_warmups[code] = task
+        task.add_done_callback(lambda done, code=code: card_warmups.get(code) is done and card_warmups.pop(code))
+
+
+async def _warm_card(market, code):
+    try:
+        with timed("card.warmup", code=code):
+            await get_or_build_card(market, code)
+    except Exception as exc:  # the screen and chat retry on their own; never an unobserved task error
+        logger.warning("Price card warm-up failed (%s)", type(exc).__name__)
+
+
 async def get_or_build_card(market, stock_code: str) -> dict:
     last = None
     async for update in card_updates(market, stock_code):
