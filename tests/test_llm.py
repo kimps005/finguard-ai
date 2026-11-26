@@ -205,3 +205,29 @@ def test_role_configured_to_gemini_keeps_the_callers_timeout(monkeypatch):
 
     asyncio.run(llm.invoke("analyst", "진단", "공시", Analysis, timeout=60))
     assert google.call_args.kwargs["timeout"] == 60
+
+
+def test_dashscope_client_is_reused_within_an_event_loop(monkeypatch):
+    clear_models(monkeypatch)
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dash")
+    dash = Mock()
+    dash.return_value.with_structured_output.return_value.ainvoke = AsyncMock(
+        return_value=Analysis(analysis_text="x", citations=[]))
+    monkeypatch.setattr(llm, "ChatOpenAI", dash)
+
+    async def twice(role, timeout):
+        for _ in range(2):
+            await llm.invoke(role, "진단", "공시", Analysis, timeout=timeout)
+
+    asyncio.run(twice("answer", 30))
+    assert dash.call_count == 1  # one HTTP pool, so the second call skips the TCP+TLS handshake
+    asyncio.run(twice("answer", 30))
+    assert dash.call_count == 2  # a new loop cannot use connections opened by a closed one
+
+    async def mixed():
+        await llm.invoke("answer", "진단", "공시", Analysis, timeout=30)
+        await llm.invoke("analyst", "진단", "공시", Analysis, timeout=60)
+        await llm.invoke("answer", "진단", "공시", Analysis, timeout=60)
+
+    asyncio.run(mixed())
+    assert dash.call_count == 5  # budget, model and timeout each select their own client

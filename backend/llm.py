@@ -8,6 +8,7 @@ import os
 import re
 import traceback
 from typing import Literal
+from weakref import WeakKeyDictionary
 
 from google.genai.types import HarmBlockThreshold, HarmCategory
 from httpx import TimeoutException
@@ -29,6 +30,10 @@ QWEN_THINKING_BUDGET = {"analyst": 1024, "answer": 2048}
 # A Gemini call that follows a DashScope failure never waits longer than this.
 FALLBACK_TIMEOUT = 30
 logger = logging.getLogger(__name__)
+# DashScope clients per event loop and settings. LangChain gives every ChatOpenAI its own async HTTP pool, so a
+# client built per call paid a fresh TCP+TLS handshake (0.4-0.55s to dashscope-intl, measured 2026-11-26).
+# Pools belong to the loop that opened them, hence one cache per loop.
+_dashscope_clients: WeakKeyDictionary = WeakKeyDictionary()
 # The model that produced the last successful invoke() in this context: the role's DashScope model,
 # or the Gemini model it fell back to. Callers that log the answering model read it right after awaiting.
 last_model: ContextVar[str | None] = ContextVar("last_model", default=None)
@@ -145,10 +150,15 @@ async def invoke_dashscope(role, model, key, messages, schema, *, timeout):
     options = {}
     if model in (DEFAULTS["analyst"], DEFAULTS["answer"]) and role in QWEN_THINKING_BUDGET:
         options["extra_body"] = {"thinking_budget": QWEN_THINKING_BUDGET[role]}
-    client = await asyncio.to_thread(
-        ChatOpenAI, api_key=key, base_url=os.getenv("DASHSCOPE_BASE_URL", "").strip() or BASE_URL,
-        model=model, temperature=0, timeout=timeout, max_retries=0, **options,
-    )
+    base_url = os.getenv("DASHSCOPE_BASE_URL", "").strip() or BASE_URL
+    clients = _dashscope_clients.setdefault(asyncio.get_running_loop(), {})
+    budget = options.get("extra_body", {}).get("thinking_budget")
+    cache_key = (ChatOpenAI, key, base_url, model, timeout, budget)
+    if (client := clients.get(cache_key)) is None:
+        client = clients[cache_key] = await asyncio.to_thread(
+            ChatOpenAI, api_key=key, base_url=base_url,
+            model=model, temperature=0, timeout=timeout, max_retries=0, **options,
+        )
     instruction = f"다음 스키마에 맞는 JSON 객체를 반환하라.\n{json.dumps(schema.model_json_schema(), ensure_ascii=False)}"
     json_messages = [("system", f"{messages[0][1]}\n\n{instruction}"), *messages[1:]]
     try:
