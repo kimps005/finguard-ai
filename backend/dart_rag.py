@@ -55,6 +55,22 @@ async def _gpu_call(fn, *args):
     return await asyncio.shield(worker)
 
 
+def _warm_models():
+    encoder, reranker = _models()
+    encoder.encode(["준비"], show_progress_bar=False)
+    reranker.predict([("준비", "준비")], show_progress_bar=False)
+
+
+async def warm_up():
+    """Load Kiwi, bge-m3 and the reranker before the first request needs them.
+
+    Cold, measured 2026-11-26: Kiwi 1.8s + model load 16.3s + first encode 1.0s. Left to the first price
+    card, the disclosure search hit its 30s limit and the card was built without filings.
+    """
+    await asyncio.to_thread(lambda: _kiwi().split_into_sents("준비. 완료."))
+    await _gpu_call(_warm_models)
+
+
 def _encode(texts):
     encoder, _ = _models()
     return encoder.encode(texts, batch_size=BATCH_SIZE, normalize_embeddings=True,

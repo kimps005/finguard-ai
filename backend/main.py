@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, StringConstraints
 from redis.exceptions import RedisError
 
-from backend import db
+from backend import dart_rag, db
 from backend.broker import BrokerConfigurationError, BrokerConnector, BrokerError
 from backend.connectors import ExternalConnectors
 from backend.dart_etl import DartETL
@@ -42,6 +42,15 @@ async def keep_krx_session(market_data, interval=300, margin=900):
         await asyncio.sleep(interval)
 
 
+async def warm_models():
+    """Background model load; a failure (no GPU, missing weights) leaves loading to the first request."""
+    try:
+        with timed("startup.warm_models"):
+            await dart_rag.warm_up()
+    except Exception as exc:
+        logger.warning("Model warm-up failed (%s)", type(exc).__name__)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     provider = os.getenv("BROKER_PROVIDER", "toss").strip().lower()
@@ -63,9 +72,11 @@ async def lifespan(app: FastAPI):
         app.state.graph = build_graph(app.state.market)
         keep_session = getattr(broker.market_data, "keep_session", None)
         krx_task = asyncio.create_task(keep_krx_session(broker.market_data)) if keep_session else None
+        warm_task = asyncio.create_task(warm_models())
         try:
             yield
         finally:
+            warm_task.cancel()
             if krx_task:
                 krx_task.cancel()
             await app.state.dart_etl.close()

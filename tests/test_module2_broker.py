@@ -445,6 +445,9 @@ def test_missing_flow_session_is_not_replaced_by_older_data(settings, monkeypatc
 @pytest.mark.parametrize("provider,account_type", [("toss", TossAccount), ("kis", KisAccount)])
 def test_health_and_connector_lifespan(settings, monkeypatch, provider, account_type):
     monkeypatch.setenv("BROKER_PROVIDER", provider)
+    from backend import main
+    warm = AsyncMock()
+    monkeypatch.setattr(main.dart_rag, "warm_up", warm)
 
     async def run():
         async with app.router.lifespan_context(app), httpx.AsyncClient(
@@ -456,5 +459,7 @@ def test_health_and_connector_lifespan(settings, monkeypatch, provider, account_
             # Either account source shares the one connector for KRX market data.
             assert type(app.state.broker.account) is account_type
             assert app.state.broker.account.connector is app.state.broker
+            await asyncio.sleep(0)
+            warm.assert_awaited_once()  # RAG and Kiwi models load in the background at startup
 
     asyncio.run(run())

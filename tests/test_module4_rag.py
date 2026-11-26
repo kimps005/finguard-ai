@@ -330,3 +330,29 @@ def test_embedding_runs_without_holding_a_database_connection(db, monkeypatch):
     monkeypatch.setattr(rag, "embed", embed)
     run(service._index_report(CORP, {"rcept_no": RECEIPT, "rcept_dt": "20260115", "report_nm": "발행결정"}))
     assert db.execute("SELECT count(*) FROM dart_chunks").fetchone() == (1,)
+
+
+def test_warm_up_loads_kiwi_and_both_models_under_the_gpu_semaphore(monkeypatch):
+    from unittest.mock import Mock
+
+    kiwi, encoder, reranker = Mock(), Mock(), Mock()
+    held = []
+    encoder.encode.side_effect = lambda *a, **k: held.append(rag.gpu_semaphore.locked())
+    monkeypatch.setattr(rag, "_kiwi", lambda: kiwi)
+    monkeypatch.setattr(rag, "_models", lambda: (encoder, reranker))
+
+    asyncio.run(rag.warm_up())
+    kiwi.split_into_sents.assert_called_once()
+    reranker.predict.assert_called_once()
+    assert held == [True] and not rag.gpu_semaphore.locked()
+
+
+def test_startup_warm_up_failure_is_logged_not_raised(monkeypatch, caplog):
+    from backend import main
+
+    async def no_gpu():
+        raise RuntimeError("DART RAG inference requires a CUDA GPU")
+
+    monkeypatch.setattr(main.dart_rag, "warm_up", no_gpu)
+    asyncio.run(main.warm_models())
+    assert "Model warm-up failed (RuntimeError)" in caplog.text
