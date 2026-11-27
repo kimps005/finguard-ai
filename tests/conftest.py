@@ -12,6 +12,13 @@ import pytest
 MIGRATIONS = Path(__file__).resolve().parents[1] / "backend" / "migrations"
 
 
+def pytest_collection_modifyitems(items):
+    """Every test that reaches the real PostgreSQL fixture gets the db marker, so CI can deselect it."""
+    for item in items:
+        if "database" in getattr(item, "fixturenames", ()):
+            item.add_marker(pytest.mark.db)
+
+
 @pytest.fixture(scope="session")
 def database(tmp_path_factory):
     """Use an ephemeral PostgreSQL or a supplied test DSN, in a private schema."""
