@@ -1,5 +1,7 @@
 # FinGuard AI
 
+[![CI](https://github.com/kimps005/finguard-ai/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kimps005/finguard-ai/actions/workflows/ci.yml)
+
 **국내 주식 계좌 진단 도구. 공시·오버행·수급·거시 지표를 병렬로 수집하고, 수치는 `Decimal` 엔진이 계산하며, LLM은 인용이 검증된 공시 해석만 맡습니다.**
 
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
