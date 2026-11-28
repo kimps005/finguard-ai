@@ -19,7 +19,7 @@ function request(path: string, pin?: string) {
 }
 
 function configureProxy(t: TestContext) {
-  const config = { APP_ACCESS_PIN: "0728", BACKEND_INTERNAL_URL: "http://backend:8000/" };
+  const config = { APP_ACCESS_PIN: "test-pin", BACKEND_INTERNAL_URL: "http://backend:8000/" };
   const configuredKeys = Object.keys(config);
   const previous = configuredKeys.map((key) => [key, process.env[key]] as const);
   t.after(() => {
@@ -34,7 +34,7 @@ function configureProxy(t: TestContext) {
 test("both routes refuse missing and incorrect PINs before reaching the backend", async (t) => {
   configureProxy(t);
   const upstream = t.mock.method(globalThis, "fetch", () => assert.fail("unexpected backend request"));
-  for (const pin of [undefined, "", "0729", "07280"]) {
+  for (const pin of [undefined, "", "test-pix", "test-pin0"]) {
     for (const response of [await POST(request("/api/chat", pin)), await GET(request("/api/account", pin))]) {
       assert.equal(response.status, 401);
       assert.deepEqual(await response.json(), { message: "Unauthorized" });
@@ -42,8 +42,8 @@ test("both routes refuse missing and incorrect PINs before reaching the backend"
     }
   }
   delete process.env.APP_ACCESS_PIN;
-  assert.equal((await POST(request("/api/chat", "0728"))).status, 401);
-  assert.equal((await GET(request("/api/account", "0728"))).status, 401);
+  assert.equal((await POST(request("/api/chat", "test-pin"))).status, 401);
+  assert.equal((await GET(request("/api/account", "test-pin"))).status, 401);
   assert.equal(upstream.mock.callCount(), 0);
 });
 
@@ -68,7 +68,7 @@ test("a valid PIN forwards intact SSE chunks before upstream closes", { timeout:
     return new Response(body, { headers: { "Content-Type": "text/event-stream; charset=utf-8" } });
   });
 
-  const response = await POST(request("/api/chat", "0728"));
+  const response = await POST(request("/api/chat", "test-pin"));
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("Content-Type"), "text/event-stream");
   assert.equal(response.headers.get("Cache-Control"), "no-cache, no-transform");
@@ -92,7 +92,7 @@ test("account proxy forwards the lightweight snapshot without caching", async (t
     assert.equal(new Headers(init.headers).get("X-App-Pin"), null);
     return Response.json(snapshot);
   });
-  const response = await GET(request("/api/account", "0728"));
+  const response = await GET(request("/api/account", "test-pin"));
   assert.equal(response.headers.get("Cache-Control"), "no-store");
   assert.deepEqual(await response.json(), snapshot);
   assert.equal(upstream.mock.callCount(), 1);
@@ -105,7 +105,7 @@ test("account proxy explains missing settings without exposing upstream details"
 
   for (const [mode, key] of [["live", "KIS_ACCOUNT_NO"], ["virtual", "KIS_VIRTUAL_ACCOUNT_NO"]]) {
     problem = { ...problem, mode };
-    const response = await GET(request("/api/account", "0728"));
+    const response = await GET(request("/api/account", "test-pin"));
     assert.equal(response.status, 503);
     assert.equal(response.headers.get("Cache-Control"), "no-store");
     const { message } = await response.json();
@@ -114,12 +114,12 @@ test("account proxy explains missing settings without exposing upstream details"
   }
 
   problem = { ...problem, code: "toss_account_not_configured" };
-  const toss = await GET(request("/api/account", "0728"));
+  const toss = await GET(request("/api/account", "test-pin"));
   assert.equal(toss.status, 503);
   assert.match((await toss.json()).message, /TOSS_CLIENT_ID.*TOSS_CLIENT_SECRET/);
 
   problem = { ...problem, code: "unknown_error" };
-  const response = await GET(request("/api/account", "0728"));
+  const response = await GET(request("/api/account", "test-pin"));
   assert.equal(response.status, 502);
   assert.ok(!(await response.text()).includes(problem.message));
 });
