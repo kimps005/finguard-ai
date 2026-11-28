@@ -646,6 +646,8 @@ npm --prefix frontend run build
 
 Module 4 통합 테스트는 기본적으로 내장 PostgreSQL(`embedded-postgres`)을 띄우고, 띄울 수 없으면 안내와 함께 건너뜁니다. Compose DB를 쓰려면 `db`와 `redis`를 루프백 포트로 띄우고 `PGDATABASE`, `PGUSER`, `PGPASSWORD`와 함께 `MODULE4_TEST_DSN`을 지정합니다. 테스트는 pgvector가 설치된 DB에 별도 스키마를 만들고 끝나면 삭제합니다.
 
+로컬 기본은 내장 PostgreSQL 18(빠른 확인용)이고, 기준 버전은 CI와 compose가 함께 쓰는 PostgreSQL 15(`pgvector/pgvector:0.8.7-pg15`)입니다. PG15에서 로컬로 확인하려면 아래처럼 `MODULE4_TEST_DSN`을 compose DB로 지정합니다.
+
 ```powershell
 $env:MODULE4_TEST_DSN = 'host=127.0.0.1 port=55432'
 .\.venv\Scripts\python.exe -m pytest tests/test_module4_rag.py
