@@ -11,11 +11,11 @@ function configureProxy(t: TestContext) {
       else process.env[key as string] = value;
     }
   });
-  process.env.APP_ACCESS_PIN = "0728";
+  process.env.APP_ACCESS_PIN = "test-pin";
   process.env.BACKEND_INTERNAL_URL = "http://backend:8000/";
 }
 
-function get(path: string, pin: string | undefined = "0728") {
+function get(path: string, pin: string | undefined = "test-pin") {
   return new Request(`http://localhost${path}`, { headers: pin === undefined ? {} : { "X-App-Pin": pin } });
 }
 
@@ -25,7 +25,7 @@ const candleRoute = (path: string, code = "005930", pin?: string) =>
 test("search and candle routes refuse bad PINs and invalid input before the backend", async (t) => {
   configureProxy(t);
   const upstream = t.mock.method(globalThis, "fetch", () => assert.fail("unexpected backend request"));
-  for (const response of [await searchStocks(get("/api/stocks/search?q=삼성", "0729")),
+  for (const response of [await searchStocks(get("/api/stocks/search?q=삼성", "test-pix")),
                           await candleRoute("/api/v1/stocks/005930/candles", "005930", "")]) {
     assert.equal(response.status, 401);
     assert.equal(response.headers.get("Cache-Control"), "no-store");

@@ -230,7 +230,7 @@ finguard-ai/
 │   ├── benchmark_latency.py  # TTFE·TTFT·Warm/Cold 지연시간 벤치마크
 │   └── smoke_test_e2e.py     # FP16 VRAM 피크 + FastAPI·Next.js 실제 HTTP 스트림 검증
 ├── data/eval/ragas_benchmark_20.json  # 5대 공시 유형 × 4개 발행사 평가 데이터셋
-├── tests/                    # pytest (294개 수집)
+├── tests/                    # pytest (348개, CI에서 전부 실행, DB 통합 테스트 10개 포함)
 ├── docs/finguard_ai_prd_v3.8.md
 ├── docker-compose.yml        # frontend · backend(GPU) · db(pgvector) · redis
 ├── docker-compose.dev.yml    # 로컬 개발용 DB·Redis 루프백 포트 공개
@@ -628,7 +628,7 @@ TTFE, Fast Path TTFT, Warm Cache는 표본의 최댓값을 사용하고 Cold Cac
 
 | 영역 | 내용 |
 | --- | --- |
-| Python (pytest, 294개 수집) | Decimal 계산 경계값, 스키마 제약, 정정공시 순서 역전 재적재, 표 청킹, 하이브리드 검색 실행계획, GPU 직렬화·취소, 분산 락, LLM 대체 경로, 빈 Fan-Out, 가드레일, LLM 전면 장애, 소스별 장애 격리, 커넥션 풀 상태 초기화 |
+| Python (pytest 348개, [CI](.github/workflows/ci.yml)에서 전부 실행: 단위 338개 + `db` 마커 PostgreSQL 통합 테스트 10개) | Decimal 계산 경계값, 스키마 제약, 정정공시 순서 역전 재적재, 표 청킹, 하이브리드 검색 실행계획, GPU 직렬화·취소, 분산 락, LLM 대체 경로, 빈 Fan-Out, 가드레일, LLM 전면 장애, 소스별 장애 격리, 커넥션 풀 상태 초기화 |
 | 프론트엔드 (`node --test`) | PIN 프록시, JSON 프록시 에러 차단, SSE 파서, 진단 reducer, 진행 단계 라벨 |
 | E2E 스모크 | FP16 VRAM 피크 측정 + 임시 루프백 서버에서 FastAPI·Next.js 실제 HTTP 스트림 검증 |
 
@@ -645,6 +645,8 @@ npm --prefix frontend run build
 ```
 
 Module 4 통합 테스트는 기본적으로 내장 PostgreSQL(`embedded-postgres`)을 띄우고, 띄울 수 없으면 안내와 함께 건너뜁니다. Compose DB를 쓰려면 `db`와 `redis`를 루프백 포트로 띄우고 `PGDATABASE`, `PGUSER`, `PGPASSWORD`와 함께 `MODULE4_TEST_DSN`을 지정합니다. 테스트는 pgvector가 설치된 DB에 별도 스키마를 만들고 끝나면 삭제합니다.
+
+로컬 기본은 내장 PostgreSQL 18(빠른 확인용)이고, 기준 버전은 CI와 compose가 함께 쓰는 PostgreSQL 15(`pgvector/pgvector:0.8.7-pg15`)입니다. PG15에서 로컬로 확인하려면 아래처럼 `MODULE4_TEST_DSN`을 compose DB로 지정합니다.
 
 ```powershell
 $env:MODULE4_TEST_DSN = 'host=127.0.0.1 port=55432'
