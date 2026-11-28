@@ -10,7 +10,8 @@ import json
 import logging
 from pathlib import Path
 import re
-from zipfile import ZipFile
+from xml.etree import ElementTree
+from zipfile import ZipFile, is_zipfile
 
 import httpx
 import psycopg
@@ -44,6 +45,9 @@ INSERT INTO dart_chunks (corp_code, rcept_no, chunk_no, report_nm, rcept_dt,
 VALUES (%s, %s, %s, %s, %s, %s, %s::vector, to_tsvector('simple', %s))
 """
 LOCK_SECONDS = 600
+# document.xml answers HTTP 200 with <result><status>014</status></result> when a filing,
+# typically an [첨부정정], has no original file. Every other status must be retried.
+MISSING_DOCUMENT = "014"
 logger = logging.getLogger(__name__)
 
 
@@ -85,6 +89,16 @@ def parse_event(corp_code: str, kind: str, row: dict) -> tuple:
         raise ValueError("price outside NUMERIC(18,2)")
     return (corp_code, _optional(row.get("bd_tm")), board_date, kind, int(shares), price,
             _date(row.get(period + "_bgd")), _date(row.get(period + "_edd")), _receipt(row["rcept_no"]))
+
+
+def _document_status(data: bytes) -> str | None:
+    """The OpenDART status code when document.xml returned a status XML instead of a ZIP."""
+    try:
+        root = ElementTree.fromstring(data)
+    except ElementTree.ParseError:
+        return None
+    status = root.findtext("status") if root.tag == "result" else None
+    return status.strip() if status and status.strip() else None
 
 
 def _document_chunks(archive: bytes) -> list[str]:
@@ -231,6 +245,16 @@ class DartETL:
             if await cursor.fetchone():
                 return  # Receipts are immutable; a correction has its own receipt.
         data = await self._request("document.xml", rcept_no=receipt)
+        if not is_zipfile(BytesIO(data)):
+            status = _document_status(data)
+            if status == MISSING_DOCUMENT:
+                # Skip only this filing so older filings of the issuer are still indexed.
+                logger.warning("Skipping DART filing %s: document.xml returned status %s (no file)",
+                               receipt, status)
+                return
+            if status is not None:
+                raise RuntimeError(f"DART document.xml returned status {status}")
+            raise RuntimeError("DART document.xml returned neither a ZIP nor a status")
         chunks = await asyncio.to_thread(_document_chunks, data)
         report_date = date.fromisoformat(report["rcept_dt"])
         # Embed before opening a transaction. GPU inference is serialized and slow, and a

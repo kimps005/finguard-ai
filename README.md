@@ -230,7 +230,7 @@ finguard-ai/
 │   ├── benchmark_latency.py  # TTFE·TTFT·Warm/Cold 지연시간 벤치마크
 │   └── smoke_test_e2e.py     # FP16 VRAM 피크 + FastAPI·Next.js 실제 HTTP 스트림 검증
 ├── data/eval/ragas_benchmark_20.json  # 5대 공시 유형 × 4개 발행사 평가 데이터셋
-├── tests/                    # pytest (348개, CI에서 전부 실행, DB 통합 테스트 10개 포함)
+├── tests/                    # pytest (354개, CI에서 전부 실행, DB 통합 테스트 16개 포함)
 ├── docs/finguard_ai_prd_v3.8.md
 ├── docker-compose.yml        # frontend · backend(GPU) · db(pgvector) · redis
 ├── docker-compose.dev.yml    # 로컬 개발용 DB·Redis 루프백 포트 공개
@@ -628,7 +628,7 @@ TTFE, Fast Path TTFT, Warm Cache는 표본의 최댓값을 사용하고 Cold Cac
 
 | 영역 | 내용 |
 | --- | --- |
-| Python (pytest 348개, [CI](.github/workflows/ci.yml)에서 전부 실행: 단위 338개 + `db` 마커 PostgreSQL 통합 테스트 10개) | Decimal 계산 경계값, 스키마 제약, 정정공시 순서 역전 재적재, 표 청킹, 하이브리드 검색 실행계획, GPU 직렬화·취소, 분산 락, LLM 대체 경로, 빈 Fan-Out, 가드레일, LLM 전면 장애, 소스별 장애 격리, 커넥션 풀 상태 초기화 |
+| Python (pytest 354개, [CI](.github/workflows/ci.yml)에서 전부 실행: 단위 338개 + `db` 마커 PostgreSQL 통합 테스트 16개) | Decimal 계산 경계값, 스키마 제약, 정정공시 순서 역전 재적재, 원문 없는 공시(014) 건너뛰기, 표 청킹, 하이브리드 검색 실행계획, GPU 직렬화·취소, 분산 락, LLM 대체 경로, 빈 Fan-Out, 가드레일, LLM 전면 장애, 소스별 장애 격리, 커넥션 풀 상태 초기화 |
 | 프론트엔드 (`node --test`) | PIN 프록시, JSON 프록시 에러 차단, SSE 파서, 진단 reducer, 진행 단계 라벨 |
 | E2E 스모크 | FP16 VRAM 피크 측정 + 임시 루프백 서버에서 FastAPI·Next.js 실제 HTTP 스트림 검증 |
 
