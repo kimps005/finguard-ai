@@ -27,17 +27,20 @@ jobs:
             backend/requirements.txt
             tests/requirements.txt
 
-      # Runners have no GPU and every GPU path in the tests is mocked, so the CUDA wheels
-      # (torch+cu128, sentence-transformers, transformers) are left out. All other pins stay as written.
-      - name: Install dependencies
+      # CI-only exclusion; backend/requirements.txt and tests/requirements.txt are not modified.
+      # Why: GitHub-hosted runners have no GPU, and no test imports torch, sentence-transformers or
+      # transformers (backend/dart_rag.py imports them lazily, and the GPU test replaces them with mocks
+      # in sys.modules). The CUDA wheels (torch==2.8.0+cu128 from the PyTorch index) are several GB, so
+      # installing them would only cost time and cache space. Every other pin is installed as written.
+      - name: Install dependencies (without CUDA packages)
         run: |
-          grep -vE '^(--extra-index-url|torch==|sentence-transformers|transformers)' backend/requirements.txt > ci-requirements.txt
-          grep -v '^-r ' tests/requirements.txt >> ci-requirements.txt
-          python -m pip install -r ci-requirements.txt
+          grep -vE '^(--extra-index-url|torch==|sentence-transformers|transformers)' backend/requirements.txt > "$RUNNER_TEMP/ci-requirements.txt"
+          grep -v '^-r ' tests/requirements.txt >> "$RUNNER_TEMP/ci-requirements.txt"
+          python -m pip install -r "$RUNNER_TEMP/ci-requirements.txt"
 
       # Tests needing a real PostgreSQL (marker "db") or CUDA GPU (marker "gpu") are deselected.
       - name: Run pytest
-        run: python -m pytest -q --strict-markers -m "not gpu and not db"
+        run: python -m pytest -q -rs --strict-markers -m "not gpu and not db"
 
   frontend-test:
     name: Frontend test
