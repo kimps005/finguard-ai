@@ -303,6 +303,66 @@ def test_failed_embedding_rolls_back_entire_receipt_and_can_retry(db, monkeypatc
     assert db.execute("SELECT count(*) FROM dart_chunks").fetchone() == (9,)
 
 
+def dart_status(code, message):
+    return (f'<?xml version="1.0" encoding="UTF-8"?>\n<result><status>{code}</status>'
+            f"<message>{message}</message></result>").encode()
+
+
+MISSING_FILE = dart_status("014", "파일이 존재하지 않습니다.")
+
+
+def test_missing_attachment_correction_is_skipped_and_older_filings_are_indexed(db, monkeypatch, caplog):
+    archive = BytesIO()
+    with ZipFile(archive, "w") as package:
+        package.writestr("원문.xml", "<p>합병 결정</p>")
+    receipts = ["20261028000235", "20261020000100", "20260814002593", "20260801000010"]
+    missing = {"20261028000235", "20260814002593"}  # [첨부정정] filings without an original
+
+    def handle(request):
+        endpoint = request.url.path.split("/")[-1]
+        if endpoint == "document.xml":
+            receipt = request.url.params["rcept_no"]
+            return httpx.Response(200, content=MISSING_FILE if receipt in missing else archive.getvalue())
+        if endpoint == "list.json":
+            return httpx.Response(200, json={"status": "000", "total_page": 1, "list": [
+                {"corp_code": CORP, "rcept_no": r, "report_nm": "[첨부정정]주요사항보고서",
+                 "rcept_dt": "20261028"} for r in receipts]})
+        return httpx.Response(200, json={"status": "013"})
+
+    monkeypatch.setattr(rag, "keywords", AsyncMock(return_value=["합병"]))
+    monkeypatch.setattr(rag, "embed", AsyncMock(return_value=[VECTOR]))
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+            await etl.DartETL(None, http, "test")._ingest(CORP, date(2026, 8, 1), date(2026, 11, 27))
+
+    with caplog.at_level("WARNING", logger=etl.__name__):
+        run(scenario())
+    indexed = {r for r, in db.execute("SELECT DISTINCT rcept_no FROM dart_chunks").fetchall()}
+    assert indexed == set(receipts) - missing
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert all(any(receipt in w and "014" in w for w in warnings) for receipt in missing)
+
+
+@pytest.mark.parametrize("body,match", [
+    (dart_status("020", "요청 제한을 초과하였습니다."), "status 020"),
+    (dart_status("013", "조회된 데이타가 없습니다."), "status 013"),
+    (dart_status("800", "시스템 점검으로 인한 서비스가 중지 중입니다."), "status 800"),
+    ("<html><body>502 Bad Gateway</body></html>".encode(), "neither a ZIP nor a status"),
+    (b"\x00\x01 truncated", "neither a ZIP nor a status"),
+])
+def test_document_errors_other_than_missing_file_are_raised_for_retry(db, monkeypatch, body, match):
+    service = etl.DartETL(None, None, "test")
+    monkeypatch.setattr(service, "_request", AsyncMock(return_value=body))
+    embed = AsyncMock(return_value=[VECTOR])
+    monkeypatch.setattr(rag, "embed", embed)
+    report = {"rcept_no": RECEIPT, "rcept_dt": "20260115", "report_nm": "발행결정"}
+    with pytest.raises(RuntimeError, match=match):
+        run(service._index_report(CORP, report))
+    embed.assert_not_awaited()
+    assert db.execute("SELECT count(*) FROM dart_chunks").fetchone() == (0,)
+
+
 def test_embedding_runs_without_holding_a_database_connection(db, monkeypatch):
     archive = BytesIO()
     with ZipFile(archive, "w") as package:
